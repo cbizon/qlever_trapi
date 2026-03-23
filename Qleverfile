@@ -1,11 +1,11 @@
 # Generated for indexing a KGX-derived RDF dataset with qlever-control.
 [data]
-NAME         = translator_kg
+NAME         = artifacts/qlever/translator_kg/translator_kg
 GET_DATA_CMD =
-DESCRIPTION  = RDF converted from translator_kg.nt.zst
+DESCRIPTION  = RDF converted from artifacts/rdf/translator_kg.nt.zst
 
 [index]
-INPUT_FILES     = translator_kg.nt.zst
+INPUT_FILES     = artifacts/rdf/translator_kg.nt.zst
 CAT_INPUT_FILES = zstd -dc -- ${INPUT_FILES}
 SETTINGS_JSON   = { "num-triples-per-batch": 1000000 }
 

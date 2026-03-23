@@ -1,45 +1,43 @@
 # qlever_trapi
 
-Tools for converting a KGX Biolink knowledge graph to RDF for QLever, building a
-QLever index, and querying reified paths.
+Convert a KGX Biolink graph to RDF for QLever, build the index, and query reified paths.
 
 ## Setup
 
-Use the project virtual environment via `uv run`. Do not install into the
-system Python or Anaconda base environment.
+Use `uv run`. Do not install into the system Python or Anaconda base environment.
 
-## Convert KGX To RDF
+## Layout
 
-Convert a KGX `tar.zst` archive to N-Triples compressed with Zstandard:
+Generated files live under `artifacts/`:
+- `artifacts/rdf/<dataset>.nt.zst`
+- `artifacts/qlever/<dataset>/<dataset>*`
 
-```bash
-uv run python kgx_to_qlever_rdf.py translator_kg.tar.zst translator_kg.nt.zst
-```
+## Build
 
-What the converter does:
-- streams the input archive without unpacking it first
-- emits RDF N-Triples suitable for QLever
-- reifies every edge as an `rdf:Statement`
-- emits Biolink class, predicate, and qualifier hierarchies
-- attaches nodes to their most specific Biolink classes
-
-## Build The QLever Index
-
-Run the end-to-end build script:
+End-to-end build:
 
 ```bash
 ./build_translator_kg.sh
 ```
 
-Or run the indexing step directly:
+Edit the variables at the top of [build_translator_kg.sh](/Users/bizon/Projects/Dogsled/qlever_trapi/build_translator_kg.sh) for your actual input archive, dataset name, and artifact locations.
+
+Manual conversion:
+
+```bash
+mkdir -p artifacts/rdf
+uv run python kgx_to_qlever_rdf.py translator_kg.tar.zst artifacts/rdf/translator_kg.nt.zst
+```
+
+Manual indexing:
 
 ```bash
 qlever index \
   --system native \
-  --name translator_kg \
+  --name artifacts/qlever/translator_kg/translator_kg \
   --format nt \
-  --input-files 'translator_kg.nt.zst' \
-  --cat-input-files 'zstd -dc -- translator_kg.nt.zst' \
+  --input-files 'artifacts/rdf/translator_kg.nt.zst' \
+  --cat-input-files 'zstd -dc -- artifacts/rdf/translator_kg.nt.zst' \
   --parallel-parsing false \
   --text-index from_literals \
   --stxxl-memory 32G
@@ -47,29 +45,23 @@ qlever index \
 
 ## Start QLever
 
-For large path queries, increase both query memory and timeout:
-
 ```bash
 qlever start \
   --system native \
-  --name translator_kg \
+  --name artifacts/qlever/translator_kg/translator_kg \
   --memory-for-queries 16G \
   --timeout 120s
 ```
 
-The default `30s` timeout is too small for very large path exports.
+Use a larger timeout for large path exports; the default `30s` is too small.
 
 ## Query Paths
-
-`find_paths.py` queries the live QLever server and returns JSON.
-
-Example:
 
 ```bash
 uv run python find_paths.py CHEBI:45783 MONDO:0004979 3 --page-size 10000000
 ```
 
-Include node and edge properties:
+With properties:
 
 ```bash
 uv run python find_paths.py CHEBI:45783 MONDO:0004979 3 --page-size 10000000 --include-properties

@@ -14,9 +14,14 @@ def parse_args() -> argparse.Namespace:
         help="Dataset name used by qlever-control.",
     )
     parser.add_argument(
+        "--artifacts-dir",
+        default="artifacts",
+        help="Base directory for RDF and QLever index artifacts.",
+    )
+    parser.add_argument(
         "--input-file",
-        default="translator_kg.nt",
-        help="RDF input file to index.",
+        default=None,
+        help="RDF input file to index. Defaults to <artifacts-dir>/rdf/<dataset-name>.nt.zst.",
     )
     parser.add_argument(
         "--qleverfile",
@@ -48,8 +53,16 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def default_input_file(dataset_name: str, artifacts_dir: str) -> str:
+    return str(Path(artifacts_dir) / "rdf" / f"{dataset_name}.nt.zst")
+
+
+def dataset_base_name(dataset_name: str, artifacts_dir: str) -> str:
+    return str(Path(artifacts_dir) / "qlever" / dataset_name / dataset_name)
+
+
 def render_qleverfile(
-    dataset_name: str,
+    dataset_base: str,
     input_file: str,
     port: int,
     ui_port: int,
@@ -58,7 +71,7 @@ def render_qleverfile(
     cat_input_files = qleverfile_cat_input_files_command(input_file)
     return f"""# Generated for indexing a KGX-derived RDF dataset with qlever-control.
 [data]
-NAME         = {dataset_name}
+NAME         = {dataset_base}
 GET_DATA_CMD =
 DESCRIPTION  = RDF converted from {input_file}
 
@@ -92,11 +105,11 @@ def direct_cat_input_files_command(input_file: str) -> str:
     return f"cat {input_file}"
 
 
-def render_index_command(dataset_name: str, input_file: str, memory: str) -> str:
+def render_index_command(dataset_base: str, input_file: str, memory: str) -> str:
     command = [
         "qlever index",
         "--system native",
-        f"--name {dataset_name}",
+        f"--name '{dataset_base}'",
         "--format nt",
         f"--input-files '{input_file}'",
     ]
@@ -118,11 +131,14 @@ def main() -> None:
     if qleverfile.exists() and not args.overwrite:
         raise SystemExit(f"{qleverfile} already exists; pass --overwrite to replace it")
 
+    input_file = args.input_file or default_input_file(args.dataset_name, args.artifacts_dir)
+    dataset_base = dataset_base_name(args.dataset_name, args.artifacts_dir)
     access_token = secrets.token_urlsafe(18)
+    qleverfile.parent.mkdir(parents=True, exist_ok=True)
     qleverfile.write_text(
         render_qleverfile(
-            dataset_name=args.dataset_name,
-            input_file=args.input_file,
+            dataset_base=dataset_base,
+            input_file=input_file,
             port=args.port,
             ui_port=args.ui_port,
             access_token=access_token,
@@ -133,10 +149,10 @@ def main() -> None:
     print(f"Wrote {qleverfile}")
     print()
     print("Index command:")
-    print(render_index_command(args.dataset_name, args.input_file, args.memory))
+    print(render_index_command(dataset_base, input_file, args.memory))
     print()
     print("Start command:")
-    print(f"qlever start --system native --name {args.dataset_name}")
+    print(f"qlever start --system native --name '{dataset_base}'")
     print()
     print("UI command:")
     print(f"qlever ui --qleverfile {qleverfile}")

@@ -222,3 +222,6 @@ translator_kg.index-log.txt
 # Local scratch outputs
 3hops
 res3
+
+# Default generated artifact root
+artifacts/
