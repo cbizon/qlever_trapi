@@ -1,0 +1,21 @@
+# Generated for indexing a KGX-derived RDF dataset with qlever-control.
+[data]
+NAME         = translator_kg
+GET_DATA_CMD =
+DESCRIPTION  = RDF converted from translator_kg.nt.zst
+
+[index]
+INPUT_FILES     = translator_kg.nt.zst
+CAT_INPUT_FILES = zstd -dc -- ${INPUT_FILES}
+SETTINGS_JSON   = { "num-triples-per-batch": 1000000 }
+
+[server]
+PORT         = 8888
+ACCESS_TOKEN = SDLn9uVpgHsU5tyrOveGQ391
+
+[runtime]
+SYSTEM = native
+
+[ui]
+UI_PORT   = 8176
+UI_CONFIG = default

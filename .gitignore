@@ -205,3 +205,20 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Project-generated RDF, KGX, and QLever artifacts
+translator_kg.tar.zst
+translator_kg.nt
+translator_kg.nt.zst
+translator_kg.index*
+translator_kg.internal.index*
+translator_kg.text.*
+translator_kg.vocabulary.*
+translator_kg.meta-data.json
+translator_kg.settings.json
+translator_kg.server-log.txt
+translator_kg.index-log.txt
+
+# Local scratch outputs
+3hops
+res3
