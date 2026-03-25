@@ -15,6 +15,7 @@ def test_build_paths_query_length_two_inlines_constants_and_directions():
     assert "<https://identifiers.org/MONDO:0004979>" in query
     assert "node1_label" not in query
     assert "FILTER(?edge1 != ?edge2)" not in query
+    assert query.count("UNION") == 3
     assert "LIMIT 50" in query
 
 
@@ -30,6 +31,23 @@ def test_build_paths_query_length_three_has_all_branch_directions():
     assert "FILTER(?edge1 != ?edge2)" not in query
     assert "FILTER(?edge1 != ?edge3)" not in query
     assert "FILTER(?edge2 != ?edge3)" not in query
+
+
+def test_build_paths_query_with_subclasses_adds_witness_nodes_and_subclass_edges():
+    query = build_paths_query(
+        "https://identifiers.org/CHEBI:45783",
+        "https://identifiers.org/MONDO:0004979",
+        2,
+        include_subclasses=True,
+    )
+    assert "?match0" in query
+    assert "?subclass_edge0" in query
+    assert "?match2" in query
+    assert "?subclass_edge2" in query
+    assert "<https://w3id.org/biolink/vocab/subclass_of>" in query
+    assert "rdf:object <https://identifiers.org/CHEBI:45783>" in query
+    assert "rdf:object <https://identifiers.org/MONDO:0004979>" in query
+    assert query.count("UNION") == 15
 
 
 def test_build_properties_query_excludes_reification_predicates():
@@ -48,3 +66,4 @@ def test_parse_args_defaults_page_size_to_100k(monkeypatch):
     )
     args = parse_args()
     assert args.page_size == 100000
+    assert args.include_subclasses is False

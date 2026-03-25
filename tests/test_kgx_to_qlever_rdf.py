@@ -8,9 +8,15 @@ from bmt import Toolkit
 from kgx_to_qlever_rdf import (
     BIOLINK_ENUM_NS,
     BIOLINK_VOCAB,
+    KGXTR_REVERSE_TRAVERSAL_EDGE,
+    KGXTR_TRAVERSAL_EDGE,
+    KGXTR_TRAVERSAL_FROM,
+    KGXTR_TRAVERSAL_TO,
+    KGXTR_TRAVERSES,
     convert_archive,
     emit_enum_hierarchy,
     most_specific_categories,
+    reverse_traversal_iri,
 )
 
 
@@ -150,3 +156,51 @@ def test_emit_enum_hierarchy_handles_list_parent_values():
         f"<{BIOLINK_VOCAB}is_a> "
         f"<{BIOLINK_ENUM_NS}ClinicalApprovalStatusEnum/approved_for_condition> ."
     ) in triples
+
+
+def test_convert_archive_adds_reverse_traversal_aliases_when_enabled(tmp_path):
+    archive_path = tmp_path / "sample.tar.zst"
+    output_path = tmp_path / "sample.nt"
+    write_tar_zst(
+        archive_path,
+        {
+            "nodes.jsonl": json.dumps(
+                {
+                    "id": "NCBIGene:1",
+                    "category": ["biolink:NamedThing", "biolink:Gene"],
+                }
+            )
+            + "\n"
+            + json.dumps(
+                {
+                    "id": "PR:1",
+                    "category": ["biolink:NamedThing", "biolink:Protein"],
+                }
+            )
+            + "\n",
+            "edges.jsonl": json.dumps(
+                {
+                    "id": "urn:uuid:test-edge",
+                    "subject": "NCBIGene:1",
+                    "predicate": "biolink:related_to",
+                    "object": "PR:1",
+                    "category": ["biolink:Association"],
+                }
+            )
+            + "\n",
+        },
+    )
+
+    convert_archive(archive_path, output_path, add_reverse_traversal_edges=True)
+
+    triples = output_path.read_text(encoding="utf-8")
+    reverse_iri = reverse_traversal_iri("urn:uuid:test-edge")
+
+    assert f"<urn:uuid:test-edge> <{KGXTR_TRAVERSAL_FROM}> <https://identifiers.org/NCBIGene:1> ." in triples
+    assert f"<urn:uuid:test-edge> <{KGXTR_TRAVERSAL_TO}> <https://identifiers.org/PR:1> ." in triples
+    assert f"<{reverse_iri}> <{KGXTR_TRAVERSES}> <urn:uuid:test-edge> ." in triples
+    assert f"<{reverse_iri}> <{KGXTR_TRAVERSAL_FROM}> <https://identifiers.org/PR:1> ." in triples
+    assert f"<{reverse_iri}> <{KGXTR_TRAVERSAL_TO}> <https://identifiers.org/NCBIGene:1> ." in triples
+    assert f"<{reverse_iri}> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <{KGXTR_TRAVERSAL_EDGE}> ." in triples
+    assert f"<{reverse_iri}> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <{KGXTR_REVERSE_TRAVERSAL_EDGE}> ." in triples
+    assert "<urn:uuid:test-edge> <http://www.w3.org/1999/02/22-rdf-syntax-ns#subject> <https://identifiers.org/PR:1> ." not in triples

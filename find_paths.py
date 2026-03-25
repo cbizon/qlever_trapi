@@ -8,6 +8,7 @@ import time
 import urllib.parse
 import urllib.request
 from contextlib import closing
+from itertools import product
 from typing import Any
 
 
@@ -15,6 +16,7 @@ RDF_NS = "http://www.w3.org/1999/02/22-rdf-syntax-ns#"
 RDFS_NS = "http://www.w3.org/2000/01/rdf-schema#"
 IDENTIFIERS_ORG = "https://identifiers.org/"
 BIOLINK_VOCAB = "https://w3id.org/biolink/vocab/"
+BIOLINK_SUBCLASS_OF = BIOLINK_VOCAB + "subclass_of"
 REIFICATION_PREDICATES = {
     RDF_NS + "subject",
     RDF_NS + "predicate",
@@ -66,6 +68,11 @@ def parse_args() -> argparse.Namespace:
         default=100000,
         help="Fetch paths in pages of this many rows. Default: 100000",
     )
+    parser.add_argument(
+        "--include-subclasses",
+        action="store_true",
+        help="Allow each path position to match via a single subclass_of support edge.",
+    )
     return parser.parse_args()
 
 
@@ -111,12 +118,15 @@ def label_var(index: int) -> str:
     return variable(f"node{index}_label")
 
 
-def build_branch(start_iri: str, end_iri: str, path_length: int, directions: list[str]) -> str:
-    nodes = [iri_term(start_iri)]
-    for index in range(1, path_length):
-        nodes.append(middle_node_var(index))
-    nodes.append(iri_term(end_iri))
+def witness_node_var(index: int) -> str:
+    return variable(f"match{index}")
 
+
+def subclass_edge_var(index: int) -> str:
+    return variable(f"subclass_edge{index}")
+
+
+def build_branch(nodes: list[str], directions: list[str]) -> str:
     lines: list[str] = []
     for hop_index, direction in enumerate(directions, start=1):
         edge = edge_var(hop_index)
@@ -136,42 +146,102 @@ def build_branch(start_iri: str, end_iri: str, path_length: int, directions: lis
     return "\n".join(lines)
 
 
+def build_endpoint_subclass_branch(
+    start_iri: str,
+    end_iri: str,
+    path_length: int,
+    directions: list[str],
+    start_lifted: bool,
+    end_lifted: bool,
+) -> str:
+    nodes = [witness_node_var(0) if start_lifted else iri_term(start_iri)]
+    for index in range(1, path_length):
+        nodes.append(middle_node_var(index))
+    nodes.append(witness_node_var(path_length) if end_lifted else iri_term(end_iri))
+
+    lines: list[str] = []
+    if start_lifted:
+        lines.append(
+            f"{subclass_edge_var(0)} a rdf:Statement ; rdf:subject {witness_node_var(0)} ; "
+            f"rdf:predicate <{BIOLINK_SUBCLASS_OF}> ; rdf:object <{start_iri}> ."
+        )
+    if end_lifted:
+        lines.append(
+            f"{subclass_edge_var(path_length)} a rdf:Statement ; rdf:subject {witness_node_var(path_length)} ; "
+            f"rdf:predicate <{BIOLINK_SUBCLASS_OF}> ; rdf:object <{end_iri}> ."
+        )
+    lines.append(build_branch(nodes, directions))
+    return "\n".join(lines)
+
+
+def build_all_direction_branches(nodes: list[str], path_length: int) -> str:
+    branches = []
+    for directions in product(("forward", "reverse"), repeat=path_length):
+        branches.append("{\n" + build_branch(nodes, list(directions)) + "\n}")
+    return "\n  UNION\n  ".join(branches)
+
+
+def build_all_endpoint_subclass_branches(start_iri: str, end_iri: str, path_length: int) -> str:
+    branches = []
+    for directions in product(("forward", "reverse"), repeat=path_length):
+        for start_lifted, end_lifted in product((False, True), repeat=2):
+            branches.append(
+                "{\n"
+                + build_endpoint_subclass_branch(
+                    start_iri,
+                    end_iri,
+                    path_length,
+                    list(directions),
+                    start_lifted,
+                    end_lifted,
+                )
+                + "\n}"
+            )
+    return "\n  UNION\n  ".join(branches)
+
+
 def build_paths_query(
     start_iri: str,
     end_iri: str,
     path_length: int,
     limit: int | None = None,
     offset: int | None = None,
+    include_subclasses: bool = False,
 ) -> str:
     if path_length < 1:
         raise ValueError("path_length must be at least 1")
-
-    branches: list[str] = []
-    for mask in range(1 << path_length):
-        directions = [
-            "reverse" if mask & (1 << (hop_index - 1)) else "forward"
-            for hop_index in range(1, path_length + 1)
-        ]
-        branches.append("{\n" + build_branch(start_iri, end_iri, path_length, directions) + "\n}")
 
     select_vars: list[str] = []
     for hop_index in range(1, path_length + 1):
         select_vars.extend([direction_var(hop_index), edge_var(hop_index), predicate_var(hop_index)])
         if hop_index < path_length:
             select_vars.extend([middle_node_var(hop_index)])
+    if include_subclasses:
+        select_vars.extend(
+            [
+                witness_node_var(0),
+                subclass_edge_var(0),
+                witness_node_var(path_length),
+                subclass_edge_var(path_length),
+            ]
+        )
+
+    path_nodes = [iri_term(start_iri)]
+    for index in range(1, path_length):
+        path_nodes.append(middle_node_var(index))
+    path_nodes.append(iri_term(end_iri))
+
     query_lines = [
         f"PREFIX rdf: <{RDF_NS}>",
         "SELECT DISTINCT " + " ".join(select_vars),
         "WHERE {",
-        "  " + "\n  UNION\n  ".join(branches),
     ]
+    if include_subclasses:
+        query_lines.append("  " + build_all_endpoint_subclass_branches(start_iri, end_iri, path_length))
+    else:
+        query_lines.append("  " + build_all_direction_branches(path_nodes, path_length))
     query_lines.append("}")
 
-    order_by_vars = [middle_node_var(index) for index in range(1, path_length)]
-    order_by_vars.extend(direction_var(index) for index in range(1, path_length + 1))
-    order_by_vars.extend(edge_var(index) for index in range(1, path_length + 1))
-    if order_by_vars:
-        query_lines.append("ORDER BY " + " ".join(order_by_vars))
     if limit is not None:
         query_lines.append(f"LIMIT {limit}")
     if offset is not None:
@@ -280,6 +350,21 @@ def format_path_row(row: dict[str, str], path_length: int) -> dict[str, Any]:
             "id": row[middle_node_var(index)],
             "label": None,
         }
+
+    start_witness = row.get(witness_node_var(0))
+    if start_witness:
+        path["start_witness"] = start_witness
+    start_subclass_edge = row.get(subclass_edge_var(0))
+    if start_subclass_edge:
+        path["start_subclass_edge"] = start_subclass_edge
+
+    end_witness = row.get(witness_node_var(path_length))
+    if end_witness:
+        path["end_witness"] = end_witness
+    end_subclass_edge = row.get(subclass_edge_var(path_length))
+    if end_subclass_edge:
+        path["end_subclass_edge"] = end_subclass_edge
+
     for hop_index in range(1, path_length + 1):
         step: dict[str, Any] = {
             "direction": strip_typed_literal(row[direction_var(hop_index)]),
@@ -362,6 +447,7 @@ def main() -> None:
             args.path_length,
             limit=page_limit,
             offset=offset,
+            include_subclasses=args.include_subclasses,
         )
         page_rows = 0
         for row in iter_qlever_rows(

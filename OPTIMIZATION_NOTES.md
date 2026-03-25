@@ -1,177 +1,261 @@
 # Optimization Notes
 
-Notes on possible optimizations for undirected path queries over the reified
-QLever representation.
+Notes on optimization attempts for undirected path queries over the reified
+QLever representation, and on what we learned about subclass-aware matching.
 
-## Current Query Shape
+## Current Baseline
 
-The current path query handles undirected traversal by expanding each hop into
-two possible directions:
-- forward
-- reverse
+The current default query in `find_paths.py` uses explicit branch expansion for
+undirected traversal.
 
-For a path length of `k`, this produces `2^k` `UNION` branches.
-
-For example:
+For a path length of `k`, it emits `2^k` concrete `UNION` branches:
 - 2 hops -> 4 branches
 - 3 hops -> 8 branches
 - 4 hops -> 16 branches
 
-Each branch repeats the same structural pattern with only the
-`rdf:subject`/`rdf:object` orientation swapped.
+Each branch fixes the direction of every hop and binds:
+- `rdf:subject`
+- `rdf:predicate`
+- `rdf:object`
 
-This is correct, but it has two obvious costs:
-- planner and execution overhead from many union branches
-- repeated evaluation of nearly identical joins
+For 3-hop full retrieval on the current graph, this explicit branch-expanded
+query is still the best SPARQL-only shape we tested.
 
-## Idea 1: Optimize The Query Shape
+## Benchmark Baseline
 
-Keep the RDF as-is and try to reduce duplicated query work.
+On the current server and index, the real workload is full retrieval through
+`find_paths.py`, not a count-only query.
 
-### Approach
+For `CHEBI:45783 -> MONDO:0004979`, 3 hops, full retrieval:
+- page size `100k`: about `58s`
+- page size `500k`: about `55s`
+- page size `1M`: about `55s`
+- page size `10M`: about `55s`
 
-Instead of building one full branch per direction combination, factor the query
-into hop-local relations and join those.
+Structured benchmark output:
+- [find_paths_page_sizes.json](/Users/bizon/Projects/Dogsled/qlever_trapi/artifacts/benchmarks/find_paths_page_sizes.json)
 
-For a 3-hop query, this would look like:
-- first hop possibilities anchored at the start node
-- middle hop possibilities between `node1` and `node2`
-- last hop possibilities anchored at the end node
+Conclusion:
+- page size matters a little at the low end
+- once page size is large enough, total export cost is dominated by
+  materialization, transfer, JSON serialization, and disk writes
+- the dominant problem is not paging overhead
 
-Conceptually:
-- first hop:
-  - `start -> node1`
-  - `node1 -> start`
-- middle hop:
-  - `node1 -> node2`
-  - `node2 -> node1`
-- last hop:
-  - `node2 -> end`
-  - `end -> node2`
+## SPARQL Rewrite Attempts
 
-Then join those smaller intermediate relations instead of repeating the full
-path pattern in every branch.
+### Hop-local union rewrite
 
-### Why it might help
+We replaced the explicit full-path direction branches with a query that
+factored the path into hop-local forward/reverse relations and joined those.
 
-- removes repeated `rdf:Statement` / `rdf:subject` / `rdf:object` work across
-  full branches
-- gives QLever narrower intermediates to join
-- keeps the graph model unchanged
+Expected benefit:
+- less duplicated query text
+- fewer repeated full-branch scans
 
-### Risks / limits
+Observed result:
+- it was slower, not faster
 
-- QLever's optimizer may already handle parts of this well
-- if the engine already factors these scans internally, gains may be small
-- this likely improves planning and some repeated scans, but may not produce a
-  dramatic speedup by itself
+3-hop full retrieval:
+- baseline explicit branches: about `55s`
+- hop-local union rewrite: about `89s` to `121s`
 
-### What to benchmark
+Structured benchmark output:
+- [find_paths_page_sizes_optimized.json](/Users/bizon/Projects/Dogsled/qlever_trapi/artifacts/benchmarks/find_paths_page_sizes_optimized.json)
 
-- total query time
-- memory usage
-- runtime/plan tree
-- path count correctness
-- behavior at 2-hop, 3-hop, and 4-hop path lengths
+Conclusion:
+- "less repeated text" did not translate into a better QLever plan
+- QLever preferred the explicit branch-expanded form
 
-## Idea 2: Add Inverse Traversal Edges
+### Removing `ORDER BY`
 
-Materialize reverse traversal support in the RDF so undirected search does not
-have to be expressed as a union over stored edge direction.
+We also tested the rewritten query without `ORDER BY`, on the theory that the
+global sort might be dominating runtime.
 
-### Basic idea
+Observed result:
+- still worse than the baseline
+- 3-hop full retrieval ended up around `136s` to `140s`
 
-For each original edge, add a lightweight inverse traversal representation that
-points back to the original edge.
+Structured benchmark output:
+- [find_paths_page_sizes_no_order.json](/Users/bizon/Projects/Dogsled/qlever_trapi/artifacts/benchmarks/find_paths_page_sizes_no_order.json)
 
-The key goal is:
-- preserve the original assertion direction for semantics and provenance
-- support reverse traversal without doubling full semantic content
+Conclusion:
+- removing `ORDER BY` did not rescue the bad rewrite
+- the optimizer/execution shape was the real problem, not just the final sort
 
-### Why it might help
+### `VALUES` endpoint rewrite
 
-- avoids `2^k` union growth for undirected traversal
-- should simplify the path query substantially
-- likely helps more as path length increases
+For endpoint subclass expansion, we tried pushing endpoint candidates into the
+query using `VALUES`, instead of subclass joins inside the path query.
 
-### Costs
+This was semantically cleaner than the subclass-join version, and QLever got
+through planning quickly, but it still OOMed in execution for the 3-hop
+endpoint-expanded case.
 
-- increases RDF size
-- increases index size and build time
-- adds complexity to conversion logic
-- requires care to avoid confusing traversal-only structure with "real"
-  semantic assertions
+Conclusion:
+- cleaner than subclass joins
+- still not viable as one big query on this dataset
 
-### Important caution
+## Subclass Expansion Findings
 
-Do not add full inverse semantic assertions as if they were equivalent new
-knowledge graph edges unless that is actually intended.
+### Important semantic distinction
 
-If reverse support is added, it should ideally be represented as traversal
-structure, not as an unqualified claim that the inverse assertion is present in
-the source KGX graph.
+Subclass support in this problem is auxiliary.
 
-## Idea 3: Add A Dedicated Traversal Projection
+For a requested path between `A` and `B`, the counted path length is the length
+of the supporting core path. `subclass_of` links are supporting evidence, not
+counted hops.
 
-This is a refinement of the inverse-edge idea and is probably cleaner.
+### Endpoint-only subclassing
 
-Keep the current reified RDF for semantics and provenance, but add a separate
-path-optimized adjacency layer specifically for traversal.
+We compared our staged implementation of endpoint subclass expansion against
+Max/Gandalf.
 
-### Example shapes
+Method:
+- find direct `subclass_of` children of the endpoint
+- run the exact path query once per endpoint candidate
+- normalize signatures
+- merge and deduplicate client-side
 
-Possible forms include:
-- `?node ql:incidentEdge ?edge`
-- `?edge ql:adjacentNode ?otherNode`
+Intermediate comparison files:
+- [our_endpoint_signatures.tsv](/Users/bizon/Projects/Dogsled/qlever_trapi/artifacts/compare/our_endpoint_signatures.tsv)
+- [max_endpoint_signatures.tsv](/Users/bizon/Projects/Dogsled/qlever_trapi/artifacts/compare/max_endpoint_signatures.tsv)
 
-or a similar pair of predicates that make undirected traversal direct and
-index-friendly.
+For `CHEBI:45783 -> MONDO:0004979`, 3 hops:
+- asthma (`MONDO:0004979`) has `19` direct subclasses in this graph
+- imatinib (`CHEBI:45783`) has `0`
 
-Another option is a compact node-to-node adjacency relation that still records
-which original edge supports the traversal.
+The staged endpoint-expanded result matched Max/Gandalf exactly after
+normalization:
+- our unique signatures: `6,320,813`
+- Max unique signatures: `6,320,813`
+- ours not in Max: `0`
+- Max not in ours: `0`
 
-### Why it might be better than full inverse edges
+Comparison artifacts:
+- [endpoint_compare_summary.json](/Users/bizon/Projects/Dogsled/qlever_trapi/artifacts/compare/endpoint_compare_summary.json)
+- [our_endpoint_not_max.tsv](/Users/bizon/Projects/Dogsled/qlever_trapi/artifacts/compare/our_endpoint_not_max.tsv)
+- [max_endpoint_not_ours.tsv](/Users/bizon/Projects/Dogsled/qlever_trapi/artifacts/compare/max_endpoint_not_ours.tsv)
 
-- path queries become much simpler
-- avoids semantic ambiguity
-- preserves a clean separation between:
-  - the knowledge representation
-  - the traversal index
+Conclusion:
+- endpoint-only subclassing is correct and reproducible
+- staged expansion plus merge is operationally viable
+- it matches the known Gandalf-style result
 
-### Tradeoff
+### One-shot endpoint-only subclass SPARQL
 
-This still increases graph and index size, but it does so in a way that is
-purpose-built for path search rather than duplicating semantic content.
+We also tried doing the same endpoint-only subclassing in one large SPARQL
+query.
 
-## Recommended Order
+Observed result:
+- semantically valid
+- operationally bad
+- OOM even with increased server memory
 
-### 1. Try query-shape optimization first
+The failure mode moved around depending on the rewrite:
+- subclass-join version failed in `Join on ?node1`
+- `VALUES` rewrite got further, then failed later in sort / row-combine stages
 
-This is the lowest-risk change:
-- no schema changes
-- no converter changes
-- easy to benchmark
+Conclusion:
+- endpoint-only subclassing is tractable in staged form
+- it is not tractable here as one monolithic SPARQL query
 
-If improvement is small, that is useful information.
+### Every-node subclassing
 
-### 2. If path search is a core workload, add a traversal projection
+We also tried a one-shot SPARQL formulation that allowed subclass support at
+every position in the path.
 
-If multi-hop path queries are central to the application, a dedicated
-path-optimized adjacency layer is likely the best long-term solution.
+The first version was too permissive: it effectively allowed a doubly-lifted
+cross product on each hop:
+- subject-lifted
+- object-lifted
+- both-lifted
 
-### 3. Avoid full semantic inverse duplication unless there is a strong reason
+That was the wrong semantics and blew up the internal joins badly.
 
-That approach is more expensive and muddies the model compared with an explicit
-traversal layer.
+We then corrected it to one-sided lifting per hop, but even that remained too
+expensive online.
 
-## Working Recommendation
+Conclusion:
+- every-node subclassing in one-shot SPARQL is a dud on this graph
+- the search space explodes before the final constraints collapse it
 
-Short term:
-- refactor the query shape and benchmark it carefully
+## What The Failed SPARQL Attempts Tell Us
 
-Medium term:
-- add a dedicated traversal projection during RDF conversion if path search
-  performance remains a major concern
+The key lesson is not just that subclasses add answers.
 
-This preserves the reified model while giving QLever a structure that is much
-closer to what multi-hop path expansion actually needs.
+The key lesson is that query-time subclass expansion changes the shape of the
+intermediate joins, and that is what kills QLever here.
+
+Even when the final number of extra paths is moderate, the online subclass
+query can still blow memory because:
+- subclass fanout is introduced before the main join collapses
+- `DISTINCT` then has to deduplicate a much larger intermediate relation
+
+So the failure is primarily about intermediate cardinality, not final answer
+size.
+
+## Reverse Traversal Layer
+
+Separate from subclass handling, we explored a traversal-layer idea to reduce
+the undirected-query branch explosion.
+
+The only version that made concrete sense was:
+- keep the original semantic edge canonical
+- add a reverse traversal alias for each original edge
+
+The reverse traversal alias is not a reversed semantic fact. It is only a
+traversal handle.
+
+Representation:
+- original edge keeps canonical:
+  - `rdf:subject`
+  - `rdf:predicate`
+  - `rdf:object`
+  - original properties
+- original edge also gets:
+  - `kgxtr:traversal_from`
+  - `kgxtr:traversal_to`
+- reverse alias gets:
+  - `kgxtr:traverses <original_edge>`
+  - `kgxtr:traversal_from <original_object>`
+  - `kgxtr:traversal_to <original_subject>`
+
+This solves exactly one problem:
+- undirected path traversal no longer needs `2^k` direction `UNION`s
+
+It does not solve:
+- subclass expansion
+- path result multiplicity
+- support/provenance collapse
+
+## Recommended Direction
+
+### For subclass handling
+
+The best current approach is:
+- keep a subclass map in memory
+- expand endpoint candidates outside SPARQL
+- run exact path queries sequentially or in coarse batches
+- merge and deduplicate client-side
+
+This is the only approach that has been both:
+- correct
+- proven against Max/Gandalf
+- operationally reliable on this graph
+
+### For path-query performance
+
+If further speedup is needed for undirected pathfinding itself, the most
+promising graph upgrade is:
+- materialized reverse traversal aliases
+
+That is a separate idea from subclass handling.
+
+### What not to keep pushing
+
+Based on the experiments so far, there is little reason to keep investing in:
+- hop-local SPARQL rewrites
+- giant one-shot subclass-expanded queries
+- every-node online subclass expansion in SPARQL
+
+Those paths were all benchmarked, and they all lost.

@@ -19,6 +19,7 @@ IDENTIFIERS_ORG = "https://identifiers.org/"
 KGX_SLOT_NS = "https://w3id.org/kgx/slot/"
 KGX_NODE_NS = "https://w3id.org/kgx/node/"
 BIOLINK_ENUM_NS = "https://w3id.org/biolink/enum/"
+KGXTR_NS = "https://w3id.org/kgx/traversal/"
 RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
 RDF_STATEMENT = "http://www.w3.org/1999/02/22-rdf-syntax-ns#Statement"
 RDF_SUBJECT = "http://www.w3.org/1999/02/22-rdf-syntax-ns#subject"
@@ -30,6 +31,11 @@ RDFS_SUBCLASS_OF = "http://www.w3.org/2000/01/rdf-schema#subClassOf"
 RDFS_SUBPROPERTY_OF = "http://www.w3.org/2000/01/rdf-schema#subPropertyOf"
 RDFS_LABEL = "http://www.w3.org/2000/01/rdf-schema#label"
 BIOLINK_IS_A = BIOLINK_VOCAB + "is_a"
+KGXTR_TRAVERSAL_EDGE = KGXTR_NS + "TraversalEdge"
+KGXTR_REVERSE_TRAVERSAL_EDGE = KGXTR_NS + "ReverseTraversalEdge"
+KGXTR_TRAVERSES = KGXTR_NS + "traverses"
+KGXTR_TRAVERSAL_FROM = KGXTR_NS + "traversal_from"
+KGXTR_TRAVERSAL_TO = KGXTR_NS + "traversal_to"
 
 CURIE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:[^\s]+$")
 
@@ -49,6 +55,11 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=3,
         help="Compression level used when the output filename ends in `.zst`.",
+    )
+    parser.add_argument(
+        "--add-reverse-traversal-edges",
+        action="store_true",
+        help="Emit reverse traversal aliases that point back to the original edge.",
     )
     return parser.parse_args()
 
@@ -138,6 +149,17 @@ def generated_node_iri(parent_id: str, key: str, value: Any, index: int) -> str:
         ).encode("utf-8")
     ).hexdigest()
     return KGX_NODE_NS + digest
+
+
+def reverse_traversal_iri(edge_id: str) -> str:
+    digest = hashlib.sha256(
+        json.dumps(
+            {"reverse_traversal_of": edge_id},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return KGXTR_NS + "reverse/" + digest
 
 
 def get_slot(toolkit: Toolkit, key: str) -> Any:
@@ -425,6 +447,7 @@ def convert_edges(
     seen_classes: set[str],
     seen_predicates: set[str],
     seen_enum_values: set[tuple[str, str]],
+    add_reverse_traversal_edges: bool = False,
 ) -> None:
     for raw_line in edge_stream:
         if not raw_line.strip():
@@ -447,9 +470,12 @@ def convert_edges(
 
         for predicate, obj in (
             (RDF_TYPE, nt_resource(RDF_STATEMENT)),
+            (RDF_TYPE, nt_resource(KGXTR_TRAVERSAL_EDGE)),
             (RDF_SUBJECT, nt_resource(subject_iri)),
             (RDF_PREDICATE, nt_resource(predicate_iri)),
             (RDF_OBJECT, nt_resource(object_iri)),
+            (KGXTR_TRAVERSAL_FROM, nt_resource(subject_iri)),
+            (KGXTR_TRAVERSAL_TO, nt_resource(object_iri)),
         ):
             write_triple(handle, edge_iri, predicate, obj)
 
@@ -474,8 +500,24 @@ def convert_edges(
             seen_enum_values,
         )
 
+        if add_reverse_traversal_edges:
+            reverse_iri = reverse_traversal_iri(edge["id"])
+            for predicate, obj in (
+                (RDF_TYPE, nt_resource(KGXTR_TRAVERSAL_EDGE)),
+                (RDF_TYPE, nt_resource(KGXTR_REVERSE_TRAVERSAL_EDGE)),
+                (KGXTR_TRAVERSES, nt_resource(edge_iri)),
+                (KGXTR_TRAVERSAL_FROM, nt_resource(object_iri)),
+                (KGXTR_TRAVERSAL_TO, nt_resource(subject_iri)),
+            ):
+                write_triple(handle, reverse_iri, predicate, obj)
 
-def convert_archive(input_path: Path, output_path: Path, zstd_level: int = 3) -> None:
+
+def convert_archive(
+    input_path: Path,
+    output_path: Path,
+    zstd_level: int = 3,
+    add_reverse_traversal_edges: bool = False,
+) -> None:
     toolkit = Toolkit()
     seen_classes: set[str] = set()
     seen_predicates: set[str] = set()
@@ -508,12 +550,18 @@ def convert_archive(input_path: Path, output_path: Path, zstd_level: int = 3) ->
                             seen_classes,
                             seen_predicates,
                             seen_enum_values,
+                            add_reverse_traversal_edges=add_reverse_traversal_edges,
                         )
 
 
 def main() -> None:
     args = parse_args()
-    convert_archive(args.input, args.output, zstd_level=args.zstd_level)
+    convert_archive(
+        args.input,
+        args.output,
+        zstd_level=args.zstd_level,
+        add_reverse_traversal_edges=args.add_reverse_traversal_edges,
+    )
 
 
 if __name__ == "__main__":
