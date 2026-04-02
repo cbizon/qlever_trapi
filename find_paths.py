@@ -3,12 +3,12 @@ import argparse
 import csv
 import json
 import io
+from pathlib import Path
 import sys
 import time
 import urllib.parse
 import urllib.request
 from contextlib import closing
-from itertools import product
 from typing import Any
 
 
@@ -17,6 +17,10 @@ RDFS_NS = "http://www.w3.org/2000/01/rdf-schema#"
 IDENTIFIERS_ORG = "https://identifiers.org/"
 BIOLINK_VOCAB = "https://w3id.org/biolink/vocab/"
 BIOLINK_SUBCLASS_OF = BIOLINK_VOCAB + "subclass_of"
+KGXTR_NS = "https://w3id.org/kgx/traversal/"
+KGXTR_TRAVERSAL_FROM = KGXTR_NS + "traversal_from"
+KGXTR_TRAVERSAL_TO = KGXTR_NS + "traversal_to"
+QUERY_DIR = Path(__file__).with_name("queries")
 REIFICATION_PREDICATES = {
     RDF_NS + "subject",
     RDF_NS + "predicate",
@@ -71,7 +75,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--include-subclasses",
         action="store_true",
-        help="Allow each path position to match via a single subclass_of support edge.",
+        help="Allow endpoint-only subclass_of support edges.",
+    )
+    parser.add_argument(
+        "--query-mode",
+        choices=("original", "traversal"),
+        default="original",
+        help="Path query implementation to use. Default: original",
     )
     return parser.parse_args()
 
@@ -102,16 +112,16 @@ def middle_node_var(index: int) -> str:
     return variable(f"node{index}")
 
 
-def edge_var(index: int) -> str:
-    return variable(f"edge{index}")
+def subject_var(index: int) -> str:
+    return variable(f"subject{index}")
 
 
 def predicate_var(index: int) -> str:
-    return variable(f"pred{index}")
+    return variable(f"predicate{index}")
 
 
-def direction_var(index: int) -> str:
-    return variable(f"dir{index}")
+def object_var(index: int) -> str:
+    return variable(f"object{index}")
 
 
 def label_var(index: int) -> str:
@@ -126,24 +136,11 @@ def subclass_edge_var(index: int) -> str:
     return variable(f"subclass_edge{index}")
 
 
-def build_branch(nodes: list[str], directions: list[str]) -> str:
-    lines: list[str] = []
-    for hop_index, direction in enumerate(directions, start=1):
-        edge = edge_var(hop_index)
-        pred = predicate_var(hop_index)
-        current = nodes[hop_index - 1]
-        nxt = nodes[hop_index]
-        if direction == "forward":
-            subject = current
-            obj = nxt
-        else:
-            subject = nxt
-            obj = current
-        lines.append(f'BIND("{direction}" AS {direction_var(hop_index)})')
-        lines.append(
-            f"{edge} a rdf:Statement ; rdf:subject {subject} ; rdf:predicate {pred} ; rdf:object {obj} ."
-        )
-    return "\n".join(lines)
+def render_query_file(template_name: str, replacements: dict[str, str]) -> str:
+    text = (QUERY_DIR / template_name).read_text(encoding="utf-8")
+    for key, value in replacements.items():
+        text = text.replace(key, value)
+    return text.strip()
 
 
 def build_endpoint_subclass_branch(
@@ -174,32 +171,6 @@ def build_endpoint_subclass_branch(
     return "\n".join(lines)
 
 
-def build_all_direction_branches(nodes: list[str], path_length: int) -> str:
-    branches = []
-    for directions in product(("forward", "reverse"), repeat=path_length):
-        branches.append("{\n" + build_branch(nodes, list(directions)) + "\n}")
-    return "\n  UNION\n  ".join(branches)
-
-
-def build_all_endpoint_subclass_branches(start_iri: str, end_iri: str, path_length: int) -> str:
-    branches = []
-    for directions in product(("forward", "reverse"), repeat=path_length):
-        for start_lifted, end_lifted in product((False, True), repeat=2):
-            branches.append(
-                "{\n"
-                + build_endpoint_subclass_branch(
-                    start_iri,
-                    end_iri,
-                    path_length,
-                    list(directions),
-                    start_lifted,
-                    end_lifted,
-                )
-                + "\n}"
-            )
-    return "\n  UNION\n  ".join(branches)
-
-
 def build_paths_query(
     start_iri: str,
     end_iri: str,
@@ -207,46 +178,47 @@ def build_paths_query(
     limit: int | None = None,
     offset: int | None = None,
     include_subclasses: bool = False,
+    query_mode: str = "original",
 ) -> str:
     if path_length < 1:
         raise ValueError("path_length must be at least 1")
-
-    select_vars: list[str] = []
-    for hop_index in range(1, path_length + 1):
-        select_vars.extend([direction_var(hop_index), edge_var(hop_index), predicate_var(hop_index)])
-        if hop_index < path_length:
-            select_vars.extend([middle_node_var(hop_index)])
+    if query_mode not in {"original", "traversal"}:
+        raise ValueError(f"Unknown query_mode: {query_mode}")
     if include_subclasses:
-        select_vars.extend(
-            [
-                witness_node_var(0),
-                subclass_edge_var(0),
-                witness_node_var(path_length),
-                subclass_edge_var(path_length),
-            ]
-        )
+        raise NotImplementedError("File-backed SPARQL is currently implemented only for the base and traversal queries without subclass expansion.")
 
-    path_nodes = [iri_term(start_iri)]
-    for index in range(1, path_length):
-        path_nodes.append(middle_node_var(index))
-    path_nodes.append(iri_term(end_iri))
+    template_name = f"{query_mode}_{path_length}hop.sparql"
+    replacements = {
+        "__START__": iri_term(start_iri),
+        "__END__": iri_term(end_iri),
+        "__LIMIT__": f"LIMIT {limit}" if limit is not None else "",
+        "__OFFSET__": f"OFFSET {offset}" if offset is not None else "",
+    }
+    return render_query_file(template_name, replacements)
 
-    query_lines = [
-        f"PREFIX rdf: <{RDF_NS}>",
-        "SELECT DISTINCT " + " ".join(select_vars),
-        "WHERE {",
-    ]
-    if include_subclasses:
-        query_lines.append("  " + build_all_endpoint_subclass_branches(start_iri, end_iri, path_length))
-    else:
-        query_lines.append("  " + build_all_direction_branches(path_nodes, path_length))
-    query_lines.append("}")
 
-    if limit is not None:
-        query_lines.append(f"LIMIT {limit}")
-    if offset is not None:
-        query_lines.append(f"OFFSET {offset}")
-    return "\n".join(query_lines)
+def build_count_query(paths_query: str) -> str:
+    lines = paths_query.splitlines()
+    prefix_lines = [line for line in lines if line.startswith("PREFIX ")]
+    body_lines = [line for line in lines if not line.startswith("PREFIX ")]
+    query_parts = []
+    query_parts.extend(prefix_lines)
+    query_parts.extend(
+        [
+            "SELECT (COUNT(*) AS ?count)",
+            "WHERE {",
+            "  {",
+            indent_query("\n".join(body_lines), 4),
+            "  }",
+            "}",
+        ]
+    )
+    return "\n".join(query_parts)
+
+
+def indent_query(text: str, spaces: int) -> str:
+    prefix = " " * spaces
+    return "\n".join(prefix + line if line else line for line in text.splitlines())
 
 
 def build_properties_query(resources: list[str]) -> str:
@@ -345,11 +317,6 @@ def strip_typed_literal(value: str | None) -> str:
 
 def format_path_row(row: dict[str, str], path_length: int) -> dict[str, Any]:
     path: dict[str, Any] = {"steps": []}
-    for index in range(1, path_length):
-        path[f"node{index}"] = {
-            "id": row[middle_node_var(index)],
-            "label": None,
-        }
 
     start_witness = row.get(witness_node_var(0))
     if start_witness:
@@ -367,12 +334,10 @@ def format_path_row(row: dict[str, str], path_length: int) -> dict[str, Any]:
 
     for hop_index in range(1, path_length + 1):
         step: dict[str, Any] = {
-            "direction": strip_typed_literal(row[direction_var(hop_index)]),
-            "edge": row[edge_var(hop_index)],
+            "subject": row[subject_var(hop_index)],
             "predicate": row[predicate_var(hop_index)],
+            "object": row[object_var(hop_index)],
         }
-        if hop_index < path_length:
-            step["next_node"] = row[middle_node_var(hop_index)]
         path["steps"].append(step)
     return path
 
@@ -406,20 +371,18 @@ def collect_resources(paths: list[dict[str, Any]], start_iri: str, end_iri: str)
     resources = {start_iri, end_iri}
     for path in paths:
         for step in path["steps"]:
-            resources.add(normalize_iri(step["edge"]))
-            next_node = step.get("next_node")
-            if next_node:
-                resources.add(normalize_iri(next_node))
+            resources.add(normalize_iri(step["subject"]))
+            resources.add(normalize_iri(step["predicate"]))
+            resources.add(normalize_iri(step["object"]))
     return sorted(resources)
 
 
 def resources_from_path(path: dict[str, Any], start_iri: str, end_iri: str) -> set[str]:
     resources = {start_iri, end_iri}
     for step in path["steps"]:
-        resources.add(normalize_iri(step["edge"]))
-        next_node = step.get("next_node")
-        if next_node:
-            resources.add(normalize_iri(next_node))
+        resources.add(normalize_iri(step["subject"]))
+        resources.add(normalize_iri(step["predicate"]))
+        resources.add(normalize_iri(step["object"]))
     return resources
 
 
@@ -448,6 +411,7 @@ def main() -> None:
             limit=page_limit,
             offset=offset,
             include_subclasses=args.include_subclasses,
+            query_mode=args.query_mode,
         )
         page_rows = 0
         for row in iter_qlever_rows(

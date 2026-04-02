@@ -8,11 +8,8 @@ from bmt import Toolkit
 from kgx_to_qlever_rdf import (
     BIOLINK_ENUM_NS,
     BIOLINK_VOCAB,
-    KGXTR_REVERSE_TRAVERSAL_EDGE,
-    KGXTR_TRAVERSAL_EDGE,
     KGXTR_TRAVERSAL_FROM,
     KGXTR_TRAVERSAL_TO,
-    KGXTR_TRAVERSES,
     convert_archive,
     emit_enum_hierarchy,
     most_specific_categories,
@@ -198,9 +195,12 @@ def test_convert_archive_adds_reverse_traversal_aliases_when_enabled(tmp_path):
 
     assert f"<urn:uuid:test-edge> <{KGXTR_TRAVERSAL_FROM}> <https://identifiers.org/NCBIGene:1> ." in triples
     assert f"<urn:uuid:test-edge> <{KGXTR_TRAVERSAL_TO}> <https://identifiers.org/PR:1> ." in triples
-    assert f"<{reverse_iri}> <{KGXTR_TRAVERSES}> <urn:uuid:test-edge> ." in triples
     assert f"<{reverse_iri}> <{KGXTR_TRAVERSAL_FROM}> <https://identifiers.org/PR:1> ." in triples
     assert f"<{reverse_iri}> <{KGXTR_TRAVERSAL_TO}> <https://identifiers.org/NCBIGene:1> ." in triples
-    assert f"<{reverse_iri}> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <{KGXTR_TRAVERSAL_EDGE}> ." in triples
-    assert f"<{reverse_iri}> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <{KGXTR_REVERSE_TRAVERSAL_EDGE}> ." in triples
+    assert f"<{reverse_iri}> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/1999/02/22-rdf-syntax-ns#Statement> ." in triples
+    assert f"<{reverse_iri}> <http://www.w3.org/1999/02/22-rdf-syntax-ns#subject> <https://identifiers.org/NCBIGene:1> ." in triples
+    assert f"<{reverse_iri}> <http://www.w3.org/1999/02/22-rdf-syntax-ns#predicate> <https://w3id.org/biolink/vocab/related_to> ." in triples
+    assert f"<{reverse_iri}> <http://www.w3.org/1999/02/22-rdf-syntax-ns#object> <https://identifiers.org/PR:1> ." in triples
+    assert "https://w3id.org/kgx/traversal/traverses" not in triples
+    assert f"<urn:uuid:test-edge> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://w3id.org/kgx/traversal/TraversalEdge> ." not in triples
     assert "<urn:uuid:test-edge> <http://www.w3.org/1999/02/22-rdf-syntax-ns#subject> <https://identifiers.org/PR:1> ." not in triples

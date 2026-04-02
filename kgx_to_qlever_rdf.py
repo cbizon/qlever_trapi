@@ -6,6 +6,7 @@ import io
 import json
 import re
 import tarfile
+import uuid
 from pathlib import Path
 from typing import Any, Iterator, TextIO
 from urllib.parse import quote
@@ -31,9 +32,6 @@ RDFS_SUBCLASS_OF = "http://www.w3.org/2000/01/rdf-schema#subClassOf"
 RDFS_SUBPROPERTY_OF = "http://www.w3.org/2000/01/rdf-schema#subPropertyOf"
 RDFS_LABEL = "http://www.w3.org/2000/01/rdf-schema#label"
 BIOLINK_IS_A = BIOLINK_VOCAB + "is_a"
-KGXTR_TRAVERSAL_EDGE = KGXTR_NS + "TraversalEdge"
-KGXTR_REVERSE_TRAVERSAL_EDGE = KGXTR_NS + "ReverseTraversalEdge"
-KGXTR_TRAVERSES = KGXTR_NS + "traverses"
 KGXTR_TRAVERSAL_FROM = KGXTR_NS + "traversal_from"
 KGXTR_TRAVERSAL_TO = KGXTR_NS + "traversal_to"
 
@@ -152,14 +150,7 @@ def generated_node_iri(parent_id: str, key: str, value: Any, index: int) -> str:
 
 
 def reverse_traversal_iri(edge_id: str) -> str:
-    digest = hashlib.sha256(
-        json.dumps(
-            {"reverse_traversal_of": edge_id},
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
-    return KGXTR_NS + "reverse/" + digest
+    return "urn:uuid:" + str(uuid.uuid5(uuid.NAMESPACE_URL, f"reverse-traversal:{edge_id}"))
 
 
 def get_slot(toolkit: Toolkit, key: str) -> Any:
@@ -468,15 +459,15 @@ def convert_edges(
 
         write_triple(handle, subject_iri, predicate_iri, nt_resource(object_iri))
 
-        for predicate, obj in (
+        edge_metadata = (
             (RDF_TYPE, nt_resource(RDF_STATEMENT)),
-            (RDF_TYPE, nt_resource(KGXTR_TRAVERSAL_EDGE)),
             (RDF_SUBJECT, nt_resource(subject_iri)),
             (RDF_PREDICATE, nt_resource(predicate_iri)),
             (RDF_OBJECT, nt_resource(object_iri)),
             (KGXTR_TRAVERSAL_FROM, nt_resource(subject_iri)),
             (KGXTR_TRAVERSAL_TO, nt_resource(object_iri)),
-        ):
+        )
+        for predicate, obj in edge_metadata:
             write_triple(handle, edge_iri, predicate, obj)
 
         categories = edge.get("category") or []
@@ -502,14 +493,34 @@ def convert_edges(
 
         if add_reverse_traversal_edges:
             reverse_iri = reverse_traversal_iri(edge["id"])
-            for predicate, obj in (
-                (RDF_TYPE, nt_resource(KGXTR_TRAVERSAL_EDGE)),
-                (RDF_TYPE, nt_resource(KGXTR_REVERSE_TRAVERSAL_EDGE)),
-                (KGXTR_TRAVERSES, nt_resource(edge_iri)),
+            reverse_metadata = (
+                (RDF_TYPE, nt_resource(RDF_STATEMENT)),
+                (RDF_SUBJECT, nt_resource(subject_iri)),
+                (RDF_PREDICATE, nt_resource(predicate_iri)),
+                (RDF_OBJECT, nt_resource(object_iri)),
                 (KGXTR_TRAVERSAL_FROM, nt_resource(object_iri)),
                 (KGXTR_TRAVERSAL_TO, nt_resource(subject_iri)),
-            ):
+            )
+            for predicate, obj in reverse_metadata:
                 write_triple(handle, reverse_iri, predicate, obj)
+            if isinstance(categories, list):
+                emit_type_assignments(
+                    handle,
+                    reverse_iri,
+                    categories,
+                    toolkit,
+                    seen_classes,
+                )
+            emit_attributes(
+                handle,
+                toolkit,
+                reverse_iri,
+                edge,
+                {"id", "subject", "predicate", "object", "category"},
+                seen_classes,
+                seen_predicates,
+                seen_enum_values,
+            )
 
 
 def convert_archive(

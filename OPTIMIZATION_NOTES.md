@@ -228,6 +228,155 @@ It does not solve:
 - path result multiplicity
 - support/provenance collapse
 
+### Misstep in the first reverse-traversal experiment
+
+The first reverse-traversal implementation was not the version we had decided
+to test.
+
+We had explicitly discussed two designs for reverse traversal aliases:
+- copy the edge properties onto the reverse alias
+- keep the reverse alias lean and point back to the original edge
+
+The implemented version was the lean pointer design, even though the agreed
+experiment was the copied-edge design.
+
+That mattered because the benchmarked traversal query then had to do extra work
+on every hop:
+- `OPTIONAL` lookup of `kgxtr:traverses`
+- `COALESCE(...)` to recover the canonical edge id
+- additional joins to read predicate and properties from the original edge
+
+So that benchmark was not testing the intended traversal-layer idea. It was
+testing a weaker, more indirect version that introduced extra per-hop
+indirection.
+
+Implication:
+- the disappointing benchmark on the first reverse-traversal build does not
+  fairly evaluate the copied-edge reverse-alias design
+- any further judgment on the traversal approach should be based on the copied
+  version, not the pointer version
+
+### Copied-edge traversal benchmark
+
+We then rebuilt the traversal graph using the copied-edge design we had
+actually intended to test.
+
+In that version, the reverse traversal alias is not a pointer to the original
+edge. It is itself a reified `rdf:Statement` carrying the same:
+- `rdf:subject`
+- `rdf:predicate`
+- `rdf:object`
+- edge categories
+- edge attributes
+
+with only the traversal endpoints swapped:
+- original edge: `kgxtr:traversal_from = subject`, `kgxtr:traversal_to = object`
+- reverse alias: `kgxtr:traversal_from = object`, `kgxtr:traversal_to = subject`
+
+That let the traversal query project the exact same SPARQL-level output shape
+as the base query:
+- `?subject1 ?predicate1 ?object1`
+- `?subject2 ?predicate2 ?object2`
+- `?subject3 ?predicate3 ?object3`
+
+So the comparison is now between two query implementations that emit the same
+path tuples at the SPARQL level, not between different result shapes.
+
+### Base-query correction
+
+During this comparison we also found that the first file-backed base query
+templates had regressed the plan by binding the endpoints separately instead of
+keeping them inline in the reified triple patterns.
+
+That was a query-plan problem, not a semantics problem.
+
+After restoring inline endpoint constants in:
+- [original_1hop.sparql](/Users/bizon/Projects/Dogsled/qlever_trapi/queries/original_1hop.sparql)
+- [original_2hop.sparql](/Users/bizon/Projects/Dogsled/qlever_trapi/queries/original_2hop.sparql)
+- [original_3hop.sparql](/Users/bizon/Projects/Dogsled/qlever_trapi/queries/original_3hop.sparql)
+
+the base count and traversal count matched again for the main 3-hop case:
+- `5,015,098` paths
+
+That removed the earlier confusion where the base count was blowing memory for
+reasons that initially looked like a `DISTINCT` issue. The evidence now points
+to plan quality, not to `DISTINCT` itself.
+
+### Repeat benchmark results
+
+We benchmarked the cleaned 3-hop query on:
+- base graph
+- copied-edge reverse-traversal graph
+
+Benchmark target:
+- `CHEBI:45783 -> MONDO:0004979`
+- 3 hops
+- page size `10,000,000`
+- identical projected columns
+
+Per-run results and averages:
+- [base_vs_traversal_3hop_repeats.tsv](/Users/bizon/Projects/Dogsled/qlever_trapi/artifacts/benchmarks/repeats/base_vs_traversal_3hop_repeats.tsv)
+- [original_3hop_repeat_summary.json](/Users/bizon/Projects/Dogsled/qlever_trapi/artifacts/benchmarks/repeats/original_3hop_repeat_summary.json)
+- [traversal_3hop_repeat_summary.json](/Users/bizon/Projects/Dogsled/qlever_trapi/artifacts/benchmarks/repeats/traversal_3hop_repeat_summary.json)
+
+Average timings over 5 runs:
+- base:
+  - count: `15.394s`
+  - retrieve: `38.496s`
+  - JSON write: `35.055s`
+  - end-to-end export: `73.551s`
+- traversal:
+  - count: `13.838s`
+  - retrieve: `36.160s`
+  - JSON write: `35.571s`
+  - end-to-end export: `71.731s`
+
+Important invariants across all repeat runs:
+- `path_count = 5,015,098`
+- `retrieved_rows = 5,015,098`
+- raw TSV bytes identical: `1,961,911,275`
+- final JSON bytes identical: `3,576,772,956`
+
+Interpretation:
+- traversal is somewhat faster on counting
+- traversal is also somewhat faster on retrieval
+- JSON materialization cost is effectively the same
+- the total win is modest: about `1.82s` on a `73.55s` export, or about `2.5%`
+
+### Storage cost of traversal materialization
+
+The copied-edge traversal graph materially increases storage:
+- RDF export:
+  - base: `8.7G`
+  - traversal: `13G`
+- QLever index directory:
+  - base: `24G`
+  - traversal: `34G`
+
+So the traversal build costs roughly:
+- `+4.3G` RDF output
+- `+10G` index size
+
+## Updated Conclusion
+
+The copied-edge reverse-traversal design does work correctly, and it can beat
+the base query slightly on the cleaned 3-hop benchmark.
+
+But the gain is small relative to the storage penalty.
+
+On this dataset and workload, the traversal graph does not improve the base
+enough to justify:
+- a much larger RDF artifact
+- a much larger QLever index
+- a more complex build
+
+So the current practical conclusion is:
+- keep the base graph/query as the default
+- treat traversal materialization as an interesting experiment, not the new
+  baseline
+- if we revisit traversal later, we should do it only if the workload changes
+  or if a larger benchmark shows a materially bigger win
+
 ## Recommended Direction
 
 ### For subclass handling

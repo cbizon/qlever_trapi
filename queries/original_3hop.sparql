@@ -1,0 +1,101 @@
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+SELECT DISTINCT ?subject1 ?predicate1 ?object1 ?subject2 ?predicate2 ?object2 ?subject3 ?predicate3 ?object3
+WHERE {
+  {
+    ?edge1 a rdf:Statement ; rdf:subject __START__ ; rdf:predicate ?predicate1 ; rdf:object ?node1 .
+    ?edge2 a rdf:Statement ; rdf:subject ?node1 ; rdf:predicate ?predicate2 ; rdf:object ?node2 .
+    ?edge3 a rdf:Statement ; rdf:subject ?node2 ; rdf:predicate ?predicate3 ; rdf:object __END__ .
+    BIND(__START__ AS ?subject1)
+    BIND(?node1 AS ?object1)
+    BIND(?node1 AS ?subject2)
+    BIND(?node2 AS ?object2)
+    BIND(?node2 AS ?subject3)
+    BIND(__END__ AS ?object3)
+  }
+  UNION
+  {
+    ?edge1 a rdf:Statement ; rdf:subject __START__ ; rdf:predicate ?predicate1 ; rdf:object ?node1 .
+    ?edge2 a rdf:Statement ; rdf:subject ?node1 ; rdf:predicate ?predicate2 ; rdf:object ?node2 .
+    ?edge3 a rdf:Statement ; rdf:subject __END__ ; rdf:predicate ?predicate3 ; rdf:object ?node2 .
+    BIND(__START__ AS ?subject1)
+    BIND(?node1 AS ?object1)
+    BIND(?node1 AS ?subject2)
+    BIND(?node2 AS ?object2)
+    BIND(__END__ AS ?subject3)
+    BIND(?node2 AS ?object3)
+  }
+  UNION
+  {
+    ?edge1 a rdf:Statement ; rdf:subject __START__ ; rdf:predicate ?predicate1 ; rdf:object ?node1 .
+    ?edge2 a rdf:Statement ; rdf:subject ?node2 ; rdf:predicate ?predicate2 ; rdf:object ?node1 .
+    ?edge3 a rdf:Statement ; rdf:subject ?node2 ; rdf:predicate ?predicate3 ; rdf:object __END__ .
+    BIND(__START__ AS ?subject1)
+    BIND(?node1 AS ?object1)
+    BIND(?node2 AS ?subject2)
+    BIND(?node1 AS ?object2)
+    BIND(?node2 AS ?subject3)
+    BIND(__END__ AS ?object3)
+  }
+  UNION
+  {
+    ?edge1 a rdf:Statement ; rdf:subject __START__ ; rdf:predicate ?predicate1 ; rdf:object ?node1 .
+    ?edge2 a rdf:Statement ; rdf:subject ?node2 ; rdf:predicate ?predicate2 ; rdf:object ?node1 .
+    ?edge3 a rdf:Statement ; rdf:subject __END__ ; rdf:predicate ?predicate3 ; rdf:object ?node2 .
+    BIND(__START__ AS ?subject1)
+    BIND(?node1 AS ?object1)
+    BIND(?node2 AS ?subject2)
+    BIND(?node1 AS ?object2)
+    BIND(__END__ AS ?subject3)
+    BIND(?node2 AS ?object3)
+  }
+  UNION
+  {
+    ?edge1 a rdf:Statement ; rdf:subject ?node1 ; rdf:predicate ?predicate1 ; rdf:object __START__ .
+    ?edge2 a rdf:Statement ; rdf:subject ?node1 ; rdf:predicate ?predicate2 ; rdf:object ?node2 .
+    ?edge3 a rdf:Statement ; rdf:subject ?node2 ; rdf:predicate ?predicate3 ; rdf:object __END__ .
+    BIND(?node1 AS ?subject1)
+    BIND(__START__ AS ?object1)
+    BIND(?node1 AS ?subject2)
+    BIND(?node2 AS ?object2)
+    BIND(?node2 AS ?subject3)
+    BIND(__END__ AS ?object3)
+  }
+  UNION
+  {
+    ?edge1 a rdf:Statement ; rdf:subject ?node1 ; rdf:predicate ?predicate1 ; rdf:object __START__ .
+    ?edge2 a rdf:Statement ; rdf:subject ?node1 ; rdf:predicate ?predicate2 ; rdf:object ?node2 .
+    ?edge3 a rdf:Statement ; rdf:subject __END__ ; rdf:predicate ?predicate3 ; rdf:object ?node2 .
+    BIND(?node1 AS ?subject1)
+    BIND(__START__ AS ?object1)
+    BIND(?node1 AS ?subject2)
+    BIND(?node2 AS ?object2)
+    BIND(__END__ AS ?subject3)
+    BIND(?node2 AS ?object3)
+  }
+  UNION
+  {
+    ?edge1 a rdf:Statement ; rdf:subject ?node1 ; rdf:predicate ?predicate1 ; rdf:object __START__ .
+    ?edge2 a rdf:Statement ; rdf:subject ?node2 ; rdf:predicate ?predicate2 ; rdf:object ?node1 .
+    ?edge3 a rdf:Statement ; rdf:subject ?node2 ; rdf:predicate ?predicate3 ; rdf:object __END__ .
+    BIND(?node1 AS ?subject1)
+    BIND(__START__ AS ?object1)
+    BIND(?node2 AS ?subject2)
+    BIND(?node1 AS ?object2)
+    BIND(?node2 AS ?subject3)
+    BIND(__END__ AS ?object3)
+  }
+  UNION
+  {
+    ?edge1 a rdf:Statement ; rdf:subject ?node1 ; rdf:predicate ?predicate1 ; rdf:object __START__ .
+    ?edge2 a rdf:Statement ; rdf:subject ?node2 ; rdf:predicate ?predicate2 ; rdf:object ?node1 .
+    ?edge3 a rdf:Statement ; rdf:subject __END__ ; rdf:predicate ?predicate3 ; rdf:object ?node2 .
+    BIND(?node1 AS ?subject1)
+    BIND(__START__ AS ?object1)
+    BIND(?node2 AS ?subject2)
+    BIND(?node1 AS ?object2)
+    BIND(__END__ AS ?subject3)
+    BIND(?node2 AS ?object3)
+  }
+}
+__LIMIT__
+__OFFSET__
