@@ -9,6 +9,7 @@ import pytest
 
 from qlever_trapi import (
     BIOLINK_VOCAB,
+    KGX_SLOT_NS,
     RDFS_LABEL,
     answer_trapi_request,
     build_trapi_query,
@@ -149,27 +150,314 @@ def qualifier_request(qualifier_value: str = "activity") -> dict:
     }
 
 
-def test_normalize_trapi_request_rejects_unreferenced_qnode() -> None:
+def inverse_predicate_request() -> dict:
+    return {
+        "message": {
+            "query_graph": {
+                "nodes": {
+                    "n0": {"ids": ["HP:0012592"]},
+                    "n1": {"ids": ["MONDO:0005148"]},
+                },
+                "edges": {
+                    "e0": {
+                        "subject": "n0",
+                        "object": "n1",
+                        "predicates": ["biolink:phenotype_of"],
+                    }
+                },
+            }
+        }
+    }
+
+
+def symmetric_predicate_request() -> dict:
+    return {
+        "message": {
+            "query_graph": {
+                "nodes": {
+                    "n0": {"ids": ["NCBIGene:1017"]},
+                    "n1": {"ids": ["MONDO:0005148"]},
+                },
+                "edges": {
+                    "e0": {
+                        "subject": "n0",
+                        "object": "n1",
+                        "predicates": ["biolink:genetically_associated_with"],
+                    }
+                },
+            }
+        }
+    }
+
+
+def node_constraint_request() -> dict:
+    return {
+        "message": {
+            "query_graph": {
+                "nodes": {
+                    "n0": {
+                        "categories": ["biolink:Gene"],
+                        "constraints": [{"id": "chromosome", "value": "17"}],
+                    }
+                },
+                "edges": {},
+            }
+        }
+    }
+
+
+def edge_constraint_request() -> dict:
+    request = sample_request()
+    request["message"]["query_graph"]["edges"]["e0"]["attribute_constraints"] = [
+        {"id": "fda_approved", "value": True}
+    ]
+    return request
+
+
+def all_nodes_request() -> dict:
+    return {
+        "message": {
+            "query_graph": {
+                "nodes": {
+                    "n0": {
+                        "ids": ["MONDO:0004979", "MONDO:0005148"],
+                        "categories": ["biolink:Disease"],
+                        "set_interpretation": "ALL",
+                    }
+                },
+                "edges": {},
+            }
+        }
+    }
+
+
+def no_predicate_request() -> dict:
+    request = sample_request()
+    del request["message"]["query_graph"]["edges"]["e0"]["predicates"]
+    return request
+
+
+def related_to_request() -> dict:
+    request = sample_request()
+    request["message"]["query_graph"]["edges"]["e0"]["predicates"] = ["biolink:related_to"]
+    return request
+
+
+def numeric_constraint_request() -> dict:
+    return {
+        "message": {
+            "query_graph": {
+                "nodes": {
+                    "n0": {
+                        "categories": ["biolink:Gene"],
+                        "constraints": [{"id": "length", "value": 277}],
+                    }
+                },
+                "edges": {},
+            }
+        }
+    }
+
+
+def publications_request() -> dict:
+    return {
+        "message": {
+            "query_graph": {
+                "nodes": {
+                    "n0": {"ids": ["NCBIGene:836"]},
+                    "n1": {"ids": ["NCBIGene:841"]},
+                },
+                "edges": {
+                    "e0": {
+                        "subject": "n0",
+                        "object": "n1",
+                    }
+                },
+            }
+        }
+    }
+
+
+def p_value_request() -> dict:
+    return {
+        "message": {
+            "query_graph": {
+                "nodes": {
+                    "n0": {"ids": ["MONDO:0005148"]},
+                    "n1": {"ids": ["NCBIGene:841"]},
+                },
+                "edges": {
+                    "e0": {
+                        "subject": "n0",
+                        "object": "n1",
+                    }
+                },
+            }
+        }
+    }
+
+
+def generic_attribute_request() -> dict:
+    return {
+        "message": {
+            "query_graph": {
+                "nodes": {
+                    "n0": {"ids": ["NCBIGene:836"]},
+                    "n1": {"ids": ["MONDO:0005148"]},
+                },
+                "edges": {
+                    "e0": {
+                        "subject": "n0",
+                        "object": "n1",
+                    }
+                },
+            }
+        }
+    }
+
+
+def json_attribute_request() -> dict:
+    return {
+        "message": {
+            "query_graph": {
+                "nodes": {
+                    "n0": {"ids": ["NCBIGene:672"]},
+                    "n1": {"ids": ["MONDO:0004993"]},
+                },
+                "edges": {
+                    "e0": {
+                        "subject": "n0",
+                        "object": "n1",
+                    }
+                },
+            }
+        }
+    }
+
+
+def missing_primary_source_request() -> dict:
+    return {
+        "message": {
+            "query_graph": {
+                "nodes": {
+                    "n0": {"ids": ["MESH:D014612"]},
+                    "n1": {
+                        "ids": ["MONDO:0005260"],
+                        "categories": ["biolink:Disease"],
+                    },
+                },
+                "edges": {
+                    "e0": {
+                        "subject": "n0",
+                        "object": "n1",
+                        "predicates": ["biolink:causes"],
+                    }
+                },
+            }
+        }
+    }
+
+
+def multi_qualifier_request() -> dict:
+    request = qualifier_request()
+    request["message"]["query_graph"]["edges"]["e0"]["qualifier_constraints"] = [
+        {
+            "qualifier_set": [
+                {
+                    "qualifier_type_id": "biolink:object_aspect_qualifier",
+                    "qualifier_value": "activity",
+                }
+            ]
+        },
+        {
+            "qualifier_set": [
+                {
+                    "qualifier_type_id": "biolink:qualified_predicate",
+                    "qualifier_value": "biolink:causes",
+                }
+            ]
+        },
+    ]
+    return request
+
+
+def empty_qualifier_request() -> dict:
+    request = qualifier_request()
+    request["message"]["query_graph"]["edges"]["e0"]["qualifier_constraints"] = [
+        {"qualifier_set": []}
+    ]
+    return request
+
+
+def inverse_subclass_request() -> dict:
+    return {
+        "message": {
+            "query_graph": {
+                "nodes": {
+                    "n0": {
+                        "ids": ["HP:0000118"],
+                        "categories": ["biolink:PhenotypicFeature"],
+                    },
+                    "n1": {},
+                },
+                "edges": {
+                    "e0": {
+                        "subject": "n0",
+                        "object": "n1",
+                        "predicates": ["biolink:phenotype_of"],
+                    }
+                },
+            }
+        }
+    }
+
+
+def node_only_root_request() -> dict:
+    return {
+        "message": {
+            "query_graph": {
+                "nodes": {
+                    "n0": {"ids": ["MONDO:0000001"]},
+                },
+                "edges": {},
+            }
+        }
+    }
+
+
+def empty_request() -> dict:
+    return {
+        "message": {
+            "query_graph": {
+                "nodes": {},
+                "edges": {},
+            }
+        }
+    }
+
+
+def test_normalize_trapi_request_allows_orphan_qnode() -> None:
     request = sample_request()
     request["message"]["query_graph"]["nodes"]["n2"] = {"categories": ["biolink:Gene"]}
 
-    with pytest.raises(ValueError, match="participate in at least one qedge"):
-        normalize_trapi_request(request)
+    normalized = normalize_trapi_request(request)
+
+    assert normalized["orphan_qnodes"] == {"n2"}
+    assert "n2" in normalized["original_qnodes"]
 
 
 def test_build_trapi_query_supports_multi_edge_shapes() -> None:
     query = build_trapi_query(normalize_trapi_request(chain_request(), subclass_depth=0), limit=25)
 
-    assert "SELECT DISTINCT ?node_0_n0 ?node_1_n1 ?node_2_n2 ?edge_0_e0 ?edge_1_e1 ?predicate_0_e0 ?predicate_1_e1" in query
-    assert query.count("a rdf:Statement") == 2
+    assert "SELECT DISTINCT ?node_0_n0 ?node_1_n1 ?node_2_n2 ?edge_0_e0 ?edge_1_e1 ?predicate_0_e0 ?predicate_1_e1 ?orientation_0_e0 ?orientation_1_e1" in query
+    assert query.count("a rdf:Statement") >= 2
     assert "rdf:subject ?node_0_n0" in query
     assert "rdf:object ?node_1_n1" in query
     assert "rdf:subject ?node_1_n1" in query
     assert "rdf:object ?node_2_n2" in query
     assert "<https://w3id.org/biolink/vocab/affects>" in query
-    assert "<https://w3id.org/biolink/vocab/related_to>" in query
-    assert "subClassOf" in query
     assert "subPropertyOf" in query
+    assert "UNION" in query
     assert "LIMIT 25" in query
 
 
@@ -194,6 +482,14 @@ def test_build_trapi_query_adds_qualifier_filters() -> None:
     assert "activity" in query
 
 
+def test_build_trapi_query_supports_node_only_orphan_queries() -> None:
+    query = build_trapi_query(normalize_trapi_request(node_constraint_request(), subclass_depth=1), limit=10)
+
+    assert "a rdf:Statement" not in query
+    assert "?node_0_n0 <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> ?node_type_0_n0 ." in query
+    assert "chromosome" in query
+
+
 def test_iri_to_curie_round_trips_biolink_and_identifiers_org() -> None:
     assert iri_to_curie("https://identifiers.org/MONDO:0004979") == "MONDO:0004979"
     assert iri_to_curie(BIOLINK_VOCAB + "Gene") == "biolink:Gene"
@@ -211,10 +507,38 @@ def qlever_test_server() -> tuple[str, int]:
 
             if "VALUES ?resource" in query:
                 body = properties_tsv()
-            elif "NCBIGene:283871" in query:
-                body = qualified_result_tsv()
+            elif "?edge_1_n0_subclass_edge" in query and "HP:0000118" in query:
+                body = inverse_subclass_result_tsv()
             elif "?edge_1_n0_subclass_edge" in query and "MONDO:0000001" in query:
                 body = subclass_result_tsv()
+            elif "NCBIGene:283871" in query and "?qualifier_predicate_0_1_0" in query:
+                body = multi_qualified_result_tsv()
+            elif "NCBIGene:283871" in query and "abundance" in query and "activity_or_abundance" not in query:
+                body = empty_edge_result_tsv()
+            elif "NCBIGene:283871" in query:
+                body = qualified_result_tsv()
+            elif "NCBIGene:672" in query and "MONDO:0004993" in query:
+                body = json_attribute_result_tsv()
+            elif "NCBIGene:836" in query and "NCBIGene:841" in query:
+                body = publications_edge_result_tsv()
+            elif "MESH:D014612" in query and "MONDO:0005260" in query:
+                body = missing_primary_source_result_tsv()
+            elif "MONDO:0005148" in query and "NCBIGene:841" in query:
+                body = p_value_result_tsv()
+            elif "NCBIGene:836" in query and "MONDO:0005148" in query and "rdf:Statement" in query:
+                body = generic_attribute_result_tsv()
+            elif "genetically_associated_with" in query and "NCBIGene:1017" in query and "MONDO:0005148" in query:
+                body = symmetric_result_tsv()
+            elif "HP:0012592" in query and "MONDO:0005148" in query:
+                body = inverse_result_tsv()
+            elif "length" in query and "rdf:Statement" not in query:
+                body = numeric_constraint_result_tsv()
+            elif "chromosome" in query and "rdf:Statement" not in query:
+                body = node_constraint_result_tsv()
+            elif "MONDO:0000001" in query and "rdf:Statement" not in query:
+                body = node_only_root_result_tsv()
+            elif "MONDO:0004979" in query and "MONDO:0005148" in query and "rdf:Statement" not in query:
+                body = all_nodes_result_tsv()
             elif "HP:0001627" in query and "MONDO:0004979" in query and "NCBIGene:1017" in query:
                 body = branch_result_tsv()
             elif "NCBIGene:1017" in query and "CHEBI:45783" in query and "MONDO:0004979" in query:
@@ -244,226 +568,329 @@ def qlever_test_server() -> tuple[str, int]:
 
 
 def single_edge_result_tsv() -> str:
-    return (
-        "?node_0_n0\t?node_1_n1\t?edge_0_e0\t?predicate_0_e0\n"
-        "https://identifiers.org/CHEBI:45783\t"
-        "https://identifiers.org/MONDO:0004979\t"
-        "urn:uuid:test-edge\t"
-        "https://w3id.org/biolink/vocab/treats\n"
+    return "\n".join(
+        [
+            "?node_0_n0\t?node_1_n1\t?edge_0_e0\t?predicate_0_e0\t?orientation_0_e0",
+            "https://identifiers.org/CHEBI:45783\thttps://identifiers.org/MONDO:0004979\turn:uuid:test-edge\thttps://w3id.org/biolink/vocab/treats\tforward",
+            "",
+        ]
     )
 
 
 def chain_result_tsv() -> str:
-    return (
-        "?node_0_n0\t?node_1_n1\t?node_2_n2\t?edge_0_e0\t?edge_1_e1\t?predicate_0_e0\t?predicate_1_e1\n"
-        "https://identifiers.org/CHEBI:45783\t"
-        "https://identifiers.org/NCBIGene:1017\t"
-        "https://identifiers.org/MONDO:0004979\t"
-        "urn:uuid:edge-affects\t"
-        "urn:uuid:edge-related\t"
-        "https://w3id.org/biolink/vocab/affects\t"
-        "https://w3id.org/biolink/vocab/related_to\n"
+    return "\n".join(
+        [
+            "?node_0_n0\t?node_1_n1\t?node_2_n2\t?edge_0_e0\t?edge_1_e1\t?predicate_0_e0\t?predicate_1_e1\t?orientation_0_e0\t?orientation_1_e1",
+            "https://identifiers.org/CHEBI:45783\thttps://identifiers.org/NCBIGene:1017\thttps://identifiers.org/MONDO:0004979\turn:uuid:edge-affects\turn:uuid:edge-related\thttps://w3id.org/biolink/vocab/affects\thttps://w3id.org/biolink/vocab/related_to\tforward\tforward",
+            "",
+        ]
     )
 
 
 def branch_result_tsv() -> str:
-    return (
-        "?node_0_gene\t?node_1_disease\t?node_2_phenotype\t?edge_0_e0\t?edge_1_e1\t?predicate_0_e0\t?predicate_1_e1\n"
-        "https://identifiers.org/NCBIGene:1017\t"
-        "https://identifiers.org/MONDO:0004979\t"
-        "https://identifiers.org/HP:0001627\t"
-        "urn:uuid:edge-gene-disease\t"
-        "urn:uuid:edge-gene-phenotype\t"
-        "https://w3id.org/biolink/vocab/related_to\t"
-        "https://w3id.org/biolink/vocab/causes\n"
+    return "\n".join(
+        [
+            "?node_0_gene\t?node_1_disease\t?node_2_phenotype\t?edge_0_e0\t?edge_1_e1\t?predicate_0_e0\t?predicate_1_e1\t?orientation_0_e0\t?orientation_1_e1",
+            "https://identifiers.org/NCBIGene:1017\thttps://identifiers.org/MONDO:0004979\thttps://identifiers.org/HP:0001627\turn:uuid:edge-gene-disease\turn:uuid:edge-gene-phenotype\thttps://w3id.org/biolink/vocab/related_to\thttps://w3id.org/biolink/vocab/causes\tforward\tforward",
+            "",
+        ]
+    )
+
+
+def inverse_result_tsv() -> str:
+    return "\n".join(
+        [
+            "?node_0_n0\t?node_1_n1\t?edge_0_e0\t?predicate_0_e0\t?orientation_0_e0",
+            "https://identifiers.org/HP:0012592\thttps://identifiers.org/MONDO:0005148\turn:uuid:t2d-has-phenotype\thttps://w3id.org/biolink/vocab/has_phenotype\treverse",
+            "",
+        ]
+    )
+
+
+def symmetric_result_tsv() -> str:
+    return "\n".join(
+        [
+            "?node_0_n0\t?node_1_n1\t?edge_0_e0\t?predicate_0_e0\t?orientation_0_e0",
+            "https://identifiers.org/NCBIGene:1017\thttps://identifiers.org/MONDO:0005148\turn:uuid:t2d-ga-cdk2\thttps://w3id.org/biolink/vocab/genetically_associated_with\treverse",
+            "",
+        ]
+    )
+
+
+def node_constraint_result_tsv() -> str:
+    return "\n".join(
+        [
+            "?node_0_n0",
+            "https://identifiers.org/NCBIGene:1017",
+            "",
+        ]
+    )
+
+
+def all_nodes_result_tsv() -> str:
+    return "\n".join(
+        [
+            "?node_0_n0",
+            "https://identifiers.org/MONDO:0004979",
+            "https://identifiers.org/MONDO:0005148",
+            "",
+        ]
+    )
+
+
+def node_only_root_result_tsv() -> str:
+    return "\n".join(
+        [
+            "?node_0_n0",
+            "https://identifiers.org/MONDO:0000001",
+            "",
+        ]
+    )
+
+
+def numeric_constraint_result_tsv() -> str:
+    return "\n".join(
+        [
+            "?node_0_n0",
+            "https://identifiers.org/NCBIGene:836",
+            "",
+        ]
+    )
+
+
+def empty_edge_result_tsv() -> str:
+    return "\n".join(
+        [
+            "?node_0_n0\t?node_1_n1\t?edge_0_e0\t?predicate_0_e0\t?orientation_0_e0",
+            "",
+        ]
     )
 
 
 def properties_tsv() -> str:
-    return (
-        "?resource\t?predicate\t?value\n"
-        "https://identifiers.org/CHEBI:45783\t"
-        f"{RDFS_LABEL}\t\"Imatinib\"\n"
-        "https://identifiers.org/CHEBI:45783\t"
-        "http://www.w3.org/1999/02/22-rdf-syntax-ns#type\t"
-        "https://w3id.org/biolink/vocab/ChemicalEntity\n"
-        "https://identifiers.org/NCBIGene:1017\t"
-        f"{RDFS_LABEL}\t\"CDK2\"\n"
-        "https://identifiers.org/NCBIGene:1017\t"
-        "http://www.w3.org/1999/02/22-rdf-syntax-ns#type\t"
-        "https://w3id.org/biolink/vocab/Gene\n"
-        "https://identifiers.org/MONDO:0004979\t"
-        f"{RDFS_LABEL}\t\"asthma\"\n"
-        "https://identifiers.org/MONDO:0004979\t"
-        "http://www.w3.org/1999/02/22-rdf-syntax-ns#type\t"
-        "https://w3id.org/biolink/vocab/Disease\n"
-        "https://identifiers.org/HP:0001627\t"
-        f"{RDFS_LABEL}\t\"Abnormal heart morphology\"\n"
-        "https://identifiers.org/HP:0001627\t"
-        "http://www.w3.org/1999/02/22-rdf-syntax-ns#type\t"
-        "https://w3id.org/biolink/vocab/PhenotypicFeature\n"
-        "urn:uuid:test-edge\t"
-        "http://www.w3.org/1999/02/22-rdf-syntax-ns#subject\t"
-        "https://identifiers.org/CHEBI:45783\n"
-        "urn:uuid:test-edge\t"
-        "http://www.w3.org/1999/02/22-rdf-syntax-ns#predicate\t"
-        "https://w3id.org/biolink/vocab/treats\n"
-        "urn:uuid:test-edge\t"
-        "http://www.w3.org/1999/02/22-rdf-syntax-ns#object\t"
-        "https://identifiers.org/MONDO:0004979\n"
-        "urn:uuid:test-edge\t"
-        "https://w3id.org/biolink/vocab/primary_knowledge_source\t"
-        "infores:test-kp\n"
-        "urn:uuid:test-edge\t"
-        "https://w3id.org/kgx/slot/publications\t"
-        "\"PMID:123\"\n"
-        "urn:uuid:test-edge\t"
-        "https://w3id.org/biolink/vocab/qualified_predicate\t"
-        "https://w3id.org/biolink/vocab/causes\n"
-        "urn:uuid:edge-affects\t"
-        "http://www.w3.org/1999/02/22-rdf-syntax-ns#subject\t"
-        "https://identifiers.org/CHEBI:45783\n"
-        "urn:uuid:edge-affects\t"
-        "http://www.w3.org/1999/02/22-rdf-syntax-ns#predicate\t"
-        "https://w3id.org/biolink/vocab/affects\n"
-        "urn:uuid:edge-affects\t"
-        "http://www.w3.org/1999/02/22-rdf-syntax-ns#object\t"
-        "https://identifiers.org/NCBIGene:1017\n"
-        "urn:uuid:edge-affects\t"
-        "https://w3id.org/biolink/vocab/primary_knowledge_source\t"
-        "infores:test-kp\n"
-        "urn:uuid:edge-related\t"
-        "http://www.w3.org/1999/02/22-rdf-syntax-ns#subject\t"
-        "https://identifiers.org/NCBIGene:1017\n"
-        "urn:uuid:edge-related\t"
-        "http://www.w3.org/1999/02/22-rdf-syntax-ns#predicate\t"
-        "https://w3id.org/biolink/vocab/related_to\n"
-        "urn:uuid:edge-related\t"
-        "http://www.w3.org/1999/02/22-rdf-syntax-ns#object\t"
-        "https://identifiers.org/MONDO:0004979\n"
-        "urn:uuid:edge-related\t"
-        "https://w3id.org/biolink/vocab/aggregator_knowledge_source\t"
-        "infores:test-ara\n"
-        "urn:uuid:edge-gene-disease\t"
-        "http://www.w3.org/1999/02/22-rdf-syntax-ns#subject\t"
-        "https://identifiers.org/NCBIGene:1017\n"
-        "urn:uuid:edge-gene-disease\t"
-        "http://www.w3.org/1999/02/22-rdf-syntax-ns#predicate\t"
-        "https://w3id.org/biolink/vocab/related_to\n"
-        "urn:uuid:edge-gene-disease\t"
-        "http://www.w3.org/1999/02/22-rdf-syntax-ns#object\t"
-        "https://identifiers.org/MONDO:0004979\n"
-        "urn:uuid:edge-gene-disease\t"
-        "https://w3id.org/biolink/vocab/primary_knowledge_source\t"
-        "infores:test-kp\n"
-        "urn:uuid:edge-gene-phenotype\t"
-        "http://www.w3.org/1999/02/22-rdf-syntax-ns#subject\t"
-        "https://identifiers.org/NCBIGene:1017\n"
-        "urn:uuid:edge-gene-phenotype\t"
-        "http://www.w3.org/1999/02/22-rdf-syntax-ns#predicate\t"
-        "https://w3id.org/biolink/vocab/causes\n"
-        "urn:uuid:edge-gene-phenotype\t"
-        "http://www.w3.org/1999/02/22-rdf-syntax-ns#object\t"
-        "https://identifiers.org/HP:0001627\n"
-        "urn:uuid:edge-gene-phenotype\t"
-        "https://w3id.org/biolink/vocab/supporting_data_source\t"
-        "infores:test-source\n"
-        "https://identifiers.org/MONDO:0000001\t"
-        f"{RDFS_LABEL}\t\"disease\"\n"
-        "https://identifiers.org/MONDO:0000001\t"
-        "http://www.w3.org/1999/02/22-rdf-syntax-ns#type\t"
-        "https://w3id.org/biolink/vocab/Disease\n"
-        "https://identifiers.org/MONDO:0005148\t"
-        f"{RDFS_LABEL}\t\"type 2 diabetes\"\n"
-        "https://identifiers.org/MONDO:0005148\t"
-        "http://www.w3.org/1999/02/22-rdf-syntax-ns#type\t"
-        "https://w3id.org/biolink/vocab/Disease\n"
-        "https://identifiers.org/HP:0012592\t"
-        f"{RDFS_LABEL}\t\"Albuminuria\"\n"
-        "https://identifiers.org/HP:0012592\t"
-        "http://www.w3.org/1999/02/22-rdf-syntax-ns#type\t"
-        "https://w3id.org/biolink/vocab/PhenotypicFeature\n"
-        "urn:uuid:t2d-has-phenotype\t"
-        "http://www.w3.org/1999/02/22-rdf-syntax-ns#subject\t"
-        "https://identifiers.org/MONDO:0005148\n"
-        "urn:uuid:t2d-has-phenotype\t"
-        "http://www.w3.org/1999/02/22-rdf-syntax-ns#predicate\t"
-        "https://w3id.org/biolink/vocab/has_phenotype\n"
-        "urn:uuid:t2d-has-phenotype\t"
-        "http://www.w3.org/1999/02/22-rdf-syntax-ns#object\t"
-        "https://identifiers.org/HP:0012592\n"
-        "urn:uuid:t2d-has-phenotype\t"
-        "https://w3id.org/biolink/vocab/primary_knowledge_source\t"
-        "infores:test-kp\n"
-        "urn:uuid:t2d-isa-disease\t"
-        "http://www.w3.org/1999/02/22-rdf-syntax-ns#subject\t"
-        "https://identifiers.org/MONDO:0005148\n"
-        "urn:uuid:t2d-isa-disease\t"
-        "http://www.w3.org/1999/02/22-rdf-syntax-ns#predicate\t"
-        "https://w3id.org/biolink/vocab/subclass_of\n"
-        "urn:uuid:t2d-isa-disease\t"
-        "http://www.w3.org/1999/02/22-rdf-syntax-ns#object\t"
-        "https://identifiers.org/MONDO:0000001\n"
-        "urn:uuid:t2d-isa-disease\t"
-        "https://w3id.org/biolink/vocab/primary_knowledge_source\t"
-        "infores:test-kp\n"
-        "https://identifiers.org/NCBIGene:283871\t"
-        f"{RDFS_LABEL}\t\"GENE283871\"\n"
-        "https://identifiers.org/NCBIGene:283871\t"
-        "http://www.w3.org/1999/02/22-rdf-syntax-ns#type\t"
-        "https://w3id.org/biolink/vocab/Gene\n"
-        "https://identifiers.org/PUBCHEM.COMPOUND:5460341\t"
-        f"{RDFS_LABEL}\t\"Compound5460341\"\n"
-        "https://identifiers.org/PUBCHEM.COMPOUND:5460341\t"
-        "http://www.w3.org/1999/02/22-rdf-syntax-ns#type\t"
-        "https://w3id.org/biolink/vocab/ChemicalEntity\n"
-        "urn:uuid:qualified-edge\t"
-        "http://www.w3.org/1999/02/22-rdf-syntax-ns#subject\t"
-        "https://identifiers.org/PUBCHEM.COMPOUND:5460341\n"
-        "urn:uuid:qualified-edge\t"
-        "http://www.w3.org/1999/02/22-rdf-syntax-ns#predicate\t"
-        "https://w3id.org/biolink/vocab/affects\n"
-        "urn:uuid:qualified-edge\t"
-        "http://www.w3.org/1999/02/22-rdf-syntax-ns#object\t"
-        "https://identifiers.org/NCBIGene:283871\n"
-        "urn:uuid:qualified-edge\t"
-        "https://w3id.org/biolink/vocab/primary_knowledge_source\t"
-        "infores:test-kp\n"
-        "urn:uuid:qualified-edge\t"
-        "https://w3id.org/biolink/vocab/qualified_predicate\t"
-        "https://w3id.org/biolink/vocab/causes\n"
-        "urn:uuid:qualified-edge\t"
-        "https://w3id.org/biolink/vocab/object_aspect_qualifier\t"
-        "https://w3id.org/biolink/enum/GeneOrGeneProductOrChemicalEntityAspectEnum/activity\n"
-        "urn:uuid:qualified-edge\t"
-        "https://w3id.org/biolink/vocab/object_direction_qualifier\t"
-        "https://w3id.org/biolink/enum/DirectionQualifierEnum/decreased\n"
-    )
+    rows = [
+        "?resource\t?predicate\t?value",
+        f"https://identifiers.org/CHEBI:45783\t{RDFS_LABEL}\t\"Imatinib\"",
+        "https://identifiers.org/CHEBI:45783\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#type\thttps://w3id.org/biolink/vocab/ChemicalEntity",
+        f"https://identifiers.org/NCBIGene:1017\t{RDFS_LABEL}\t\"CDK2\"",
+        "https://identifiers.org/NCBIGene:1017\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#type\thttps://w3id.org/biolink/vocab/Gene",
+        f"https://identifiers.org/NCBIGene:1017\t{KGX_SLOT_NS}chromosome\t\"17\"",
+        f"https://identifiers.org/MONDO:0004979\t{RDFS_LABEL}\t\"asthma\"",
+        "https://identifiers.org/MONDO:0004979\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#type\thttps://w3id.org/biolink/vocab/Disease",
+        f"https://identifiers.org/HP:0001627\t{RDFS_LABEL}\t\"Abnormal heart morphology\"",
+        "https://identifiers.org/HP:0001627\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#type\thttps://w3id.org/biolink/vocab/PhenotypicFeature",
+        f"https://identifiers.org/MONDO:0000001\t{RDFS_LABEL}\t\"disease\"",
+        "https://identifiers.org/MONDO:0000001\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#type\thttps://w3id.org/biolink/vocab/Disease",
+        f"https://identifiers.org/MONDO:0005148\t{RDFS_LABEL}\t\"type 2 diabetes\"",
+        "https://identifiers.org/MONDO:0005148\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#type\thttps://w3id.org/biolink/vocab/Disease",
+        f"https://identifiers.org/HP:0012592\t{RDFS_LABEL}\t\"Albuminuria\"",
+        "https://identifiers.org/HP:0012592\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#type\thttps://w3id.org/biolink/vocab/PhenotypicFeature",
+        f"https://identifiers.org/NCBIGene:283871\t{RDFS_LABEL}\t\"GENE283871\"",
+        "https://identifiers.org/NCBIGene:283871\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#type\thttps://w3id.org/biolink/vocab/Gene",
+        f"https://identifiers.org/PUBCHEM.COMPOUND:5460341\t{RDFS_LABEL}\t\"Compound5460341\"",
+        "https://identifiers.org/PUBCHEM.COMPOUND:5460341\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#type\thttps://w3id.org/biolink/vocab/ChemicalEntity",
+        "urn:uuid:test-edge\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#subject\thttps://identifiers.org/CHEBI:45783",
+        "urn:uuid:test-edge\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#predicate\thttps://w3id.org/biolink/vocab/treats",
+        "urn:uuid:test-edge\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#object\thttps://identifiers.org/MONDO:0004979",
+        f"urn:uuid:test-edge\t{KGX_SLOT_NS}sources\turn:uuid:test-edge-source-primary",
+        f"urn:uuid:test-edge\t{KGX_SLOT_NS}sources\turn:uuid:test-edge-source-aggregator",
+        "urn:uuid:test-edge\thttps://w3id.org/kgx/slot/publications\thttps://identifiers.org/PMID:123",
+        "urn:uuid:test-edge\thttps://w3id.org/kgx/slot/fda_approved\t\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>",
+        "urn:uuid:test-edge\thttps://w3id.org/biolink/vocab/qualified_predicate\thttps://w3id.org/biolink/vocab/causes",
+        "urn:uuid:test-edge-source-primary\thttps://w3id.org/biolink/vocab/resource_id\thttps://identifiers.org/infores:test-kp",
+        "urn:uuid:test-edge-source-primary\thttps://w3id.org/biolink/vocab/resource_role\thttps://w3id.org/biolink/enum/ResourceRoleEnum/primary_knowledge_source",
+        "urn:uuid:test-edge-source-aggregator\thttps://w3id.org/biolink/vocab/resource_id\thttps://identifiers.org/infores:test-ara",
+        "urn:uuid:test-edge-source-aggregator\thttps://w3id.org/biolink/vocab/resource_role\thttps://w3id.org/biolink/enum/ResourceRoleEnum/aggregator_knowledge_source",
+        "urn:uuid:test-edge-source-aggregator\thttps://w3id.org/biolink/vocab/upstream_resource_ids\thttps://identifiers.org/infores:test-kp",
+        "urn:uuid:edge-affects\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#subject\thttps://identifiers.org/CHEBI:45783",
+        "urn:uuid:edge-affects\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#predicate\thttps://w3id.org/biolink/vocab/affects",
+        "urn:uuid:edge-affects\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#object\thttps://identifiers.org/NCBIGene:1017",
+        "urn:uuid:edge-affects\thttps://w3id.org/biolink/vocab/primary_knowledge_source\tinfores:test-kp",
+        "urn:uuid:edge-related\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#subject\thttps://identifiers.org/NCBIGene:1017",
+        "urn:uuid:edge-related\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#predicate\thttps://w3id.org/biolink/vocab/related_to",
+        "urn:uuid:edge-related\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#object\thttps://identifiers.org/MONDO:0004979",
+        "urn:uuid:edge-related\thttps://w3id.org/biolink/vocab/primary_knowledge_source\tinfores:test-kp",
+        "urn:uuid:edge-related\thttps://w3id.org/biolink/vocab/aggregator_knowledge_source\tinfores:test-ara",
+        "urn:uuid:edge-gene-disease\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#subject\thttps://identifiers.org/NCBIGene:1017",
+        "urn:uuid:edge-gene-disease\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#predicate\thttps://w3id.org/biolink/vocab/related_to",
+        "urn:uuid:edge-gene-disease\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#object\thttps://identifiers.org/MONDO:0004979",
+        "urn:uuid:edge-gene-disease\thttps://w3id.org/biolink/vocab/primary_knowledge_source\tinfores:test-kp",
+        "urn:uuid:edge-gene-phenotype\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#subject\thttps://identifiers.org/NCBIGene:1017",
+        "urn:uuid:edge-gene-phenotype\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#predicate\thttps://w3id.org/biolink/vocab/causes",
+        "urn:uuid:edge-gene-phenotype\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#object\thttps://identifiers.org/HP:0001627",
+        "urn:uuid:edge-gene-phenotype\thttps://w3id.org/biolink/vocab/primary_knowledge_source\tinfores:test-kp",
+        "urn:uuid:edge-gene-phenotype\thttps://w3id.org/biolink/vocab/supporting_data_source\tinfores:test-source",
+        "urn:uuid:t2d-has-phenotype\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#subject\thttps://identifiers.org/MONDO:0005148",
+        "urn:uuid:t2d-has-phenotype\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#predicate\thttps://w3id.org/biolink/vocab/has_phenotype",
+        "urn:uuid:t2d-has-phenotype\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#object\thttps://identifiers.org/HP:0012592",
+        "urn:uuid:t2d-has-phenotype\thttps://w3id.org/biolink/vocab/primary_knowledge_source\tinfores:test-kp",
+        "urn:uuid:t2d-isa-disease\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#subject\thttps://identifiers.org/MONDO:0005148",
+        "urn:uuid:t2d-isa-disease\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#predicate\thttps://w3id.org/biolink/vocab/subclass_of",
+        "urn:uuid:t2d-isa-disease\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#object\thttps://identifiers.org/MONDO:0000001",
+        "urn:uuid:t2d-isa-disease\thttps://w3id.org/biolink/vocab/primary_knowledge_source\tinfores:test-kp",
+        "urn:uuid:qualified-edge\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#subject\thttps://identifiers.org/PUBCHEM.COMPOUND:5460341",
+        "urn:uuid:qualified-edge\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#predicate\thttps://w3id.org/biolink/vocab/affects",
+        "urn:uuid:qualified-edge\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#object\thttps://identifiers.org/NCBIGene:283871",
+        "urn:uuid:qualified-edge\thttps://w3id.org/biolink/vocab/primary_knowledge_source\tinfores:test-kp",
+        "urn:uuid:qualified-edge\thttps://w3id.org/biolink/vocab/qualified_predicate\thttps://w3id.org/biolink/vocab/causes",
+        "urn:uuid:qualified-edge\thttps://w3id.org/biolink/vocab/object_aspect_qualifier\thttps://w3id.org/biolink/enum/GeneOrGeneProductOrChemicalEntityAspectEnum/activity",
+        "urn:uuid:qualified-edge\thttps://w3id.org/biolink/vocab/object_direction_qualifier\thttps://w3id.org/biolink/enum/DirectionQualifierEnum/decreased",
+        "urn:uuid:t2d-ga-cdk2\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#subject\thttps://identifiers.org/MONDO:0005148",
+        "urn:uuid:t2d-ga-cdk2\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#predicate\thttps://w3id.org/biolink/vocab/genetically_associated_with",
+        "urn:uuid:t2d-ga-cdk2\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#object\thttps://identifiers.org/NCBIGene:1017",
+        "urn:uuid:t2d-ga-cdk2\thttps://w3id.org/biolink/vocab/primary_knowledge_source\tinfores:test-kp",
+        f"https://identifiers.org/NCBIGene:836\t{RDFS_LABEL}\t\"CASP3\"",
+        "https://identifiers.org/NCBIGene:836\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#type\thttps://w3id.org/biolink/vocab/Gene",
+        f"https://identifiers.org/NCBIGene:836\t{KGX_SLOT_NS}length\t\"277\"^^<http://www.w3.org/2001/XMLSchema#integer>",
+        f"https://identifiers.org/NCBIGene:841\t{RDFS_LABEL}\t\"GENE841\"",
+        "https://identifiers.org/NCBIGene:841\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#type\thttps://w3id.org/biolink/vocab/Gene",
+        f"https://identifiers.org/NCBIGene:672\t{RDFS_LABEL}\t\"BRCA1\"",
+        "https://identifiers.org/NCBIGene:672\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#type\thttps://w3id.org/biolink/vocab/Gene",
+        f"https://identifiers.org/MONDO:0004993\t{RDFS_LABEL}\t\"disease 4993\"",
+        "https://identifiers.org/MONDO:0004993\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#type\thttps://w3id.org/biolink/vocab/Disease",
+        f"https://identifiers.org/MESH:D014612\t{RDFS_LABEL}\t\"MESH D014612\"",
+        "https://identifiers.org/MESH:D014612\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#type\thttps://w3id.org/biolink/vocab/ChemicalEntity",
+        f"https://identifiers.org/MONDO:0005260\t{RDFS_LABEL}\t\"disease 5260\"",
+        "https://identifiers.org/MONDO:0005260\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#type\thttps://w3id.org/biolink/vocab/Disease",
+        f"https://identifiers.org/HP:0000118\t{RDFS_LABEL}\t\"Phenotypic abnormality\"",
+        "https://identifiers.org/HP:0000118\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#type\thttps://w3id.org/biolink/vocab/PhenotypicFeature",
+        "urn:uuid:edge-publications\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#subject\thttps://identifiers.org/NCBIGene:836",
+        "urn:uuid:edge-publications\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#predicate\thttps://w3id.org/biolink/vocab/related_to",
+        "urn:uuid:edge-publications\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#object\thttps://identifiers.org/NCBIGene:841",
+        "urn:uuid:edge-publications\thttps://w3id.org/biolink/vocab/primary_knowledge_source\tinfores:test-kp",
+        "urn:uuid:edge-publications\thttps://w3id.org/kgx/slot/publications\thttps://identifiers.org/PMID:123",
+        "urn:uuid:edge-p-value\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#subject\thttps://identifiers.org/MONDO:0005148",
+        "urn:uuid:edge-p-value\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#predicate\thttps://w3id.org/biolink/vocab/related_to",
+        "urn:uuid:edge-p-value\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#object\thttps://identifiers.org/NCBIGene:841",
+        "urn:uuid:edge-p-value\thttps://w3id.org/biolink/vocab/primary_knowledge_source\tinfores:test-kp",
+        "urn:uuid:edge-p-value\thttps://w3id.org/kgx/slot/p_value\t\"0.000007\"^^<http://www.w3.org/2001/XMLSchema#double>",
+        "urn:uuid:edge-non-biolink-attribute\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#subject\thttps://identifiers.org/NCBIGene:836",
+        "urn:uuid:edge-non-biolink-attribute\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#predicate\thttps://w3id.org/biolink/vocab/related_to",
+        "urn:uuid:edge-non-biolink-attribute\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#object\thttps://identifiers.org/MONDO:0005148",
+        "urn:uuid:edge-non-biolink-attribute\thttps://w3id.org/biolink/vocab/primary_knowledge_source\tinfores:test-kp",
+        "urn:uuid:edge-non-biolink-attribute\thttps://w3id.org/kgx/slot/non_biolink_attribute\t\"xxx123\"",
+        "urn:uuid:edge-json-attributes\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#subject\thttps://identifiers.org/NCBIGene:672",
+        "urn:uuid:edge-json-attributes\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#predicate\thttps://w3id.org/biolink/vocab/gene_associated_with_condition",
+        "urn:uuid:edge-json-attributes\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#object\thttps://identifiers.org/MONDO:0004993",
+        "urn:uuid:edge-json-attributes\thttps://w3id.org/biolink/vocab/primary_knowledge_source\tinfores:test-kp",
+        "urn:uuid:edge-json-attributes\thttps://w3id.org/kgx/slot/publications\thttps://identifiers.org/PMID:123",
+        'urn:uuid:edge-json-attributes\thttps://w3id.org/kgx/slot/attributes\t{"attribute_type_id": "json_attribute_1", "value": "json_value_1"}',
+        f"urn:uuid:edge-json-attributes\t{KGX_SLOT_NS}attributes\turn:uuid:json-attribute-2",
+        f"urn:uuid:edge-json-attributes\t{KGX_SLOT_NS}attributes\turn:uuid:json-attribute-3",
+        f"urn:uuid:json-attribute-2\t{KGX_SLOT_NS}attribute_type_id\t\"json_attribute_2\"",
+        f"urn:uuid:json-attribute-3\t{KGX_SLOT_NS}attribute_type_id\t\"json_attribute_3\"",
+        f"urn:uuid:json-attribute-3\t{KGX_SLOT_NS}value\t\"json_value_3\"",
+        f"urn:uuid:json-attribute-3\t{KGX_SLOT_NS}attributes\turn:uuid:nested-json-attribute-1",
+        f"urn:uuid:nested-json-attribute-1\t{KGX_SLOT_NS}attribute_type_id\t\"nested_json_attribute_1\"",
+        f"urn:uuid:nested-json-attribute-1\t{KGX_SLOT_NS}value\t\"nested_json_value_1\"",
+        "urn:uuid:edge-missing-primary\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#subject\thttps://identifiers.org/MESH:D014612",
+        "urn:uuid:edge-missing-primary\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#predicate\thttps://w3id.org/biolink/vocab/causes",
+        "urn:uuid:edge-missing-primary\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#object\thttps://identifiers.org/MONDO:0005260",
+        "urn:uuid:qualified-edge-aspect-only\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#subject\thttps://identifiers.org/PUBCHEM.COMPOUND:5460341",
+        "urn:uuid:qualified-edge-aspect-only\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#predicate\thttps://w3id.org/biolink/vocab/affects",
+        "urn:uuid:qualified-edge-aspect-only\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#object\thttps://identifiers.org/NCBIGene:283871",
+        "urn:uuid:qualified-edge-aspect-only\thttps://w3id.org/biolink/vocab/primary_knowledge_source\tinfores:test-kp",
+        "urn:uuid:qualified-edge-aspect-only\thttps://w3id.org/biolink/vocab/object_aspect_qualifier\thttps://w3id.org/biolink/enum/GeneOrGeneProductOrChemicalEntityAspectEnum/activity",
+        "urn:uuid:albuminuria-subclass-phenotype\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#subject\thttps://identifiers.org/HP:0012592",
+        "urn:uuid:albuminuria-subclass-phenotype\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#predicate\thttps://w3id.org/biolink/vocab/subclass_of",
+        "urn:uuid:albuminuria-subclass-phenotype\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#object\thttps://identifiers.org/HP:0000118",
+        "urn:uuid:albuminuria-subclass-phenotype\thttps://w3id.org/biolink/vocab/primary_knowledge_source\tinfores:test-kp",
+    ]
+    return "\n".join(rows) + "\n"
 
 
 def subclass_result_tsv() -> str:
-    return (
-        "?node_0_n0\t?node_1_n1\t?node_2_n0_superclass\t?edge_0_e0\t?edge_1_n0_subclass_edge\t?predicate_0_e0\n"
-        "https://identifiers.org/MONDO:0005148\t"
-        "https://identifiers.org/HP:0012592\t"
-        "https://identifiers.org/MONDO:0000001\t"
-        "urn:uuid:t2d-has-phenotype\t"
-        "urn:uuid:t2d-isa-disease\t"
-        "https://w3id.org/biolink/vocab/has_phenotype\n"
+    return "\n".join(
+        [
+            "?node_0_n0\t?node_1_n1\t?node_2_n0_superclass\t?edge_0_e0\t?edge_1_n0_subclass_edge\t?predicate_0_e0\t?orientation_0_e0",
+            "https://identifiers.org/MONDO:0005148\thttps://identifiers.org/HP:0012592\thttps://identifiers.org/MONDO:0000001\turn:uuid:t2d-has-phenotype\turn:uuid:t2d-isa-disease\thttps://w3id.org/biolink/vocab/has_phenotype\tforward",
+            "",
+        ]
     )
 
 
 def qualified_result_tsv() -> str:
-    return (
-        "?node_0_n0\t?node_1_n1\t?edge_0_e0\t?predicate_0_e0\n"
-        "https://identifiers.org/PUBCHEM.COMPOUND:5460341\t"
-        "https://identifiers.org/NCBIGene:283871\t"
-        "urn:uuid:qualified-edge\t"
-        "https://w3id.org/biolink/vocab/affects\n"
+    return "\n".join(
+        [
+            "?node_0_n0\t?node_1_n1\t?edge_0_e0\t?predicate_0_e0\t?orientation_0_e0",
+            "https://identifiers.org/PUBCHEM.COMPOUND:5460341\thttps://identifiers.org/NCBIGene:283871\turn:uuid:qualified-edge\thttps://w3id.org/biolink/vocab/affects\tforward",
+            "",
+        ]
     )
 
 
-def test_answer_trapi_request_returns_message_with_knowledge_graph_and_results(
+def multi_qualified_result_tsv() -> str:
+    return "\n".join(
+        [
+            "?node_0_n0\t?node_1_n1\t?edge_0_e0\t?predicate_0_e0\t?orientation_0_e0",
+            "https://identifiers.org/PUBCHEM.COMPOUND:5460341\thttps://identifiers.org/NCBIGene:283871\turn:uuid:qualified-edge\thttps://w3id.org/biolink/vocab/affects\tforward",
+            "https://identifiers.org/PUBCHEM.COMPOUND:5460341\thttps://identifiers.org/NCBIGene:283871\turn:uuid:qualified-edge-aspect-only\thttps://w3id.org/biolink/vocab/affects\tforward",
+            "",
+        ]
+    )
+
+
+def publications_edge_result_tsv() -> str:
+    return "\n".join(
+        [
+            "?node_0_n0\t?node_1_n1\t?edge_0_e0\t?predicate_0_e0\t?orientation_0_e0",
+            "https://identifiers.org/NCBIGene:836\thttps://identifiers.org/NCBIGene:841\turn:uuid:edge-publications\thttps://w3id.org/biolink/vocab/related_to\tforward",
+            "",
+        ]
+    )
+
+
+def p_value_result_tsv() -> str:
+    return "\n".join(
+        [
+            "?node_0_n0\t?node_1_n1\t?edge_0_e0\t?predicate_0_e0\t?orientation_0_e0",
+            "https://identifiers.org/MONDO:0005148\thttps://identifiers.org/NCBIGene:841\turn:uuid:edge-p-value\thttps://w3id.org/biolink/vocab/related_to\tforward",
+            "",
+        ]
+    )
+
+
+def generic_attribute_result_tsv() -> str:
+    return "\n".join(
+        [
+            "?node_0_n0\t?node_1_n1\t?edge_0_e0\t?predicate_0_e0\t?orientation_0_e0",
+            "https://identifiers.org/NCBIGene:836\thttps://identifiers.org/MONDO:0005148\turn:uuid:edge-non-biolink-attribute\thttps://w3id.org/biolink/vocab/related_to\tforward",
+            "",
+        ]
+    )
+
+
+def json_attribute_result_tsv() -> str:
+    return "\n".join(
+        [
+            "?node_0_n0\t?node_1_n1\t?edge_0_e0\t?predicate_0_e0\t?orientation_0_e0",
+            "https://identifiers.org/NCBIGene:672\thttps://identifiers.org/MONDO:0004993\turn:uuid:edge-json-attributes\thttps://w3id.org/biolink/vocab/gene_associated_with_condition\tforward",
+            "",
+        ]
+    )
+
+
+def missing_primary_source_result_tsv() -> str:
+    return "\n".join(
+        [
+            "?node_0_n0\t?node_1_n1\t?edge_0_e0\t?predicate_0_e0\t?orientation_0_e0",
+            "https://identifiers.org/MESH:D014612\thttps://identifiers.org/MONDO:0005260\turn:uuid:edge-missing-primary\thttps://w3id.org/biolink/vocab/causes\tforward",
+            "",
+        ]
+    )
+
+
+def inverse_subclass_result_tsv() -> str:
+    return "\n".join(
+        [
+            "?node_0_n0\t?node_1_n1\t?node_2_n0_superclass\t?edge_0_e0\t?edge_1_n0_subclass_edge\t?predicate_0_e0\t?orientation_0_e0",
+            "https://identifiers.org/HP:0012592\thttps://identifiers.org/MONDO:0005148\thttps://identifiers.org/HP:0000118\turn:uuid:t2d-has-phenotype\turn:uuid:albuminuria-subclass-phenotype\thttps://w3id.org/biolink/vocab/has_phenotype\treverse",
+            "",
+        ]
+    )
+
+
+def test_answer_trapi_request_returns_metadata_rich_edge_payload(
     qlever_test_server: tuple[str, int],
 ) -> None:
     host, port = qlever_test_server
@@ -477,65 +904,67 @@ def test_answer_trapi_request_returns_message_with_knowledge_graph_and_results(
         subclass_depth=0,
     )
 
-    assert response == {
-        "message": {
-            "query_graph": sample_request()["message"]["query_graph"],
-            "knowledge_graph": {
-                "nodes": {
-                    "CHEBI:45783": {
-                        "categories": ["biolink:ChemicalEntity"],
-                        "name": "Imatinib",
-                    },
-                    "MONDO:0004979": {
-                        "categories": ["biolink:Disease"],
-                        "name": "asthma",
-                    },
-                },
-                "edges": {
-                    "urn:uuid:test-edge": {
-                        "subject": "CHEBI:45783",
-                        "predicate": "biolink:treats",
-                        "object": "MONDO:0004979",
-                        "sources": [
-                            {
-                                "resource_id": "infores:test-kp",
-                                "resource_role": "primary_knowledge_source",
-                            }
-                        ],
-                        "qualifiers": [
-                            {
-                                "qualifier_type_id": "biolink:qualified_predicate",
-                                "qualifier_value": "biolink:causes",
-                            }
-                        ],
-                        "attributes": [
-                            {
-                                "attribute_type_id": "https://w3id.org/kgx/slot/publications",
-                                "value": "PMID:123",
-                            },
-                        ],
-                    }
-                },
+    edge = response["message"]["knowledge_graph"]["edges"]["urn:uuid:test-edge"]
+    assert response["message"]["knowledge_graph"]["nodes"]["CHEBI:45783"] == {
+        "categories": ["biolink:ChemicalEntity"],
+        "name": "Imatinib",
+    }
+    assert response["message"]["knowledge_graph"]["nodes"]["MONDO:0004979"] == {
+        "categories": ["biolink:Disease"],
+        "name": "asthma",
+    }
+    assert edge["subject"] == "CHEBI:45783"
+    assert edge["predicate"] == "biolink:treats"
+    assert edge["object"] == "MONDO:0004979"
+    assert edge["sources"] == [
+        {
+            "resource_id": "infores:test-kp",
+            "resource_role": "primary_knowledge_source",
+        },
+        {
+            "resource_id": "infores:test-ara",
+            "resource_role": "aggregator_knowledge_source",
+            "upstream_resource_ids": ["infores:test-kp"],
+        },
+        {
+            "resource_id": "infores:qlever-trapi-test",
+            "resource_role": "aggregator_knowledge_source",
+            "upstream_resource_ids": ["infores:test-ara"],
+        },
+    ]
+    assert edge["qualifiers"] == [
+        {
+            "qualifier_type_id": "biolink:qualified_predicate",
+            "qualifier_value": "biolink:causes",
+        }
+    ]
+    assert {
+        "original_attribute_name": "publications",
+        "attribute_type_id": "biolink:publications",
+        "value": ["PMID:123"],
+        "value_type_id": "linkml:Uriorcurie",
+    } in edge["attributes"]
+    assert {
+        "original_attribute_name": "fda_approved",
+        "attribute_type_id": "biolink:Attribute",
+        "value": True,
+    } in edge["attributes"]
+    assert response["message"]["results"] == [
+        {
+            "node_bindings": {
+                "n0": [{"id": "CHEBI:45783"}],
+                "n1": [{"id": "MONDO:0004979"}],
             },
-            "results": [
+            "analyses": [
                 {
-                    "node_bindings": {
-                        "n0": [{"id": "CHEBI:45783"}],
-                        "n1": [{"id": "MONDO:0004979"}],
+                    "resource_id": "infores:qlever-trapi-test",
+                    "edge_bindings": {
+                        "e0": [{"id": "urn:uuid:test-edge"}],
                     },
-                    "analyses": [
-                        {
-                            "resource_id": "infores:qlever-trapi-test",
-                            "edge_bindings": {
-                                "e0": [{"id": "urn:uuid:test-edge"}],
-                            },
-                        }
-                    ],
                 }
             ],
-            "auxiliary_graphs": {},
         }
-    }
+    ]
 
 
 def test_answer_trapi_request_supports_chain_query_graph(
@@ -552,10 +981,7 @@ def test_answer_trapi_request_supports_chain_query_graph(
         subclass_depth=0,
     )
 
-    assert response["message"]["knowledge_graph"]["nodes"]["NCBIGene:1017"] == {
-        "categories": ["biolink:Gene"],
-        "name": "CDK2",
-    }
+    assert response["message"]["knowledge_graph"]["nodes"]["NCBIGene:1017"]["name"] == "CDK2"
     assert response["message"]["knowledge_graph"]["edges"]["urn:uuid:edge-affects"]["predicate"] == "biolink:affects"
     assert response["message"]["knowledge_graph"]["edges"]["urn:uuid:edge-related"]["predicate"] == "biolink:related_to"
     assert response["message"]["results"] == [
@@ -723,6 +1149,489 @@ def test_answer_trapi_request_matches_qualifier_hierarchy(
     ]
 
 
+def test_answer_trapi_request_supports_inverse_predicates(
+    qlever_test_server: tuple[str, int],
+) -> None:
+    host, port = qlever_test_server
+
+    response = answer_trapi_request(
+        inverse_predicate_request(),
+        host_name=host,
+        port=port,
+        limit=10,
+        resource_id="infores:qlever-trapi-test",
+        subclass_depth=0,
+    )
+
+    result = response["message"]["results"][0]
+    assert result["node_bindings"] == {
+        "n0": [{"id": "HP:0012592"}],
+        "n1": [{"id": "MONDO:0005148"}],
+    }
+    assert result["analyses"][0]["edge_bindings"] == {
+        "e0": [{"id": "urn:uuid:t2d-has-phenotype"}],
+    }
+    edge = response["message"]["knowledge_graph"]["edges"]["urn:uuid:t2d-has-phenotype"]
+    assert edge["subject"] == "MONDO:0005148"
+    assert edge["predicate"] == "biolink:has_phenotype"
+    assert edge["object"] == "HP:0012592"
+
+
+def test_answer_trapi_request_supports_symmetric_predicates(
+    qlever_test_server: tuple[str, int],
+) -> None:
+    host, port = qlever_test_server
+
+    response = answer_trapi_request(
+        symmetric_predicate_request(),
+        host_name=host,
+        port=port,
+        limit=10,
+        resource_id="infores:qlever-trapi-test",
+        subclass_depth=0,
+    )
+
+    result = response["message"]["results"][0]
+    assert result["node_bindings"] == {
+        "n0": [{"id": "NCBIGene:1017"}],
+        "n1": [{"id": "MONDO:0005148"}],
+    }
+    assert result["analyses"][0]["edge_bindings"] == {
+        "e0": [{"id": "urn:uuid:t2d-ga-cdk2"}],
+    }
+
+
+def test_answer_trapi_request_supports_qnode_constraints(
+    qlever_test_server: tuple[str, int],
+) -> None:
+    host, port = qlever_test_server
+
+    response = answer_trapi_request(
+        node_constraint_request(),
+        host_name=host,
+        port=port,
+        limit=10,
+        resource_id="infores:qlever-trapi-test",
+        subclass_depth=1,
+    )
+
+    assert response["message"]["knowledge_graph"]["edges"] == {}
+    assert response["message"]["results"] == [
+        {
+            "node_bindings": {
+                "n0": [{"id": "NCBIGene:1017"}],
+            },
+            "analyses": [
+                {
+                    "resource_id": "infores:qlever-trapi-test",
+                    "edge_bindings": {},
+                }
+            ],
+        }
+    ]
+
+
+def test_answer_trapi_request_supports_qedge_attribute_constraints(
+    qlever_test_server: tuple[str, int],
+) -> None:
+    host, port = qlever_test_server
+
+    response = answer_trapi_request(
+        edge_constraint_request(),
+        host_name=host,
+        port=port,
+        limit=10,
+        resource_id="infores:qlever-trapi-test",
+        subclass_depth=0,
+    )
+
+    assert response["message"]["results"][0]["analyses"][0]["edge_bindings"] == {
+        "e0": [{"id": "urn:uuid:test-edge"}],
+    }
+
+
+def test_answer_trapi_request_supports_set_interpretation_all(
+    qlever_test_server: tuple[str, int],
+) -> None:
+    host, port = qlever_test_server
+
+    response = answer_trapi_request(
+        all_nodes_request(),
+        host_name=host,
+        port=port,
+        limit=10,
+        resource_id="infores:qlever-trapi-test",
+        subclass_depth=1,
+    )
+
+    assert response["message"]["knowledge_graph"]["edges"] == {}
+    assert response["message"]["results"] == [
+        {
+            "node_bindings": {
+                "n0": [
+                    {"id": "MONDO:0004979"},
+                    {"id": "MONDO:0005148"},
+                ],
+            },
+            "analyses": [
+                {
+                    "resource_id": "infores:qlever-trapi-test",
+                    "edge_bindings": {},
+                }
+            ],
+        }
+    ]
+
+
+def test_answer_trapi_request_supports_any_predicate(
+    qlever_test_server: tuple[str, int],
+) -> None:
+    host, port = qlever_test_server
+
+    response = answer_trapi_request(
+        no_predicate_request(),
+        host_name=host,
+        port=port,
+        limit=10,
+        resource_id="infores:qlever-trapi-test",
+        subclass_depth=0,
+    )
+
+    assert response["message"]["results"][0]["analyses"][0]["edge_bindings"] == {
+        "e0": [{"id": "urn:uuid:test-edge"}],
+    }
+    assert response["message"]["knowledge_graph"]["edges"]["urn:uuid:test-edge"]["predicate"] == "biolink:treats"
+
+
+def test_answer_trapi_request_supports_root_predicate(
+    qlever_test_server: tuple[str, int],
+) -> None:
+    host, port = qlever_test_server
+
+    response = answer_trapi_request(
+        related_to_request(),
+        host_name=host,
+        port=port,
+        limit=10,
+        resource_id="infores:qlever-trapi-test",
+        subclass_depth=0,
+    )
+
+    assert response["message"]["results"][0]["analyses"][0]["edge_bindings"] == {
+        "e0": [{"id": "urn:uuid:test-edge"}],
+    }
+    assert response["message"]["knowledge_graph"]["edges"]["urn:uuid:test-edge"]["predicate"] == "biolink:treats"
+
+
+def test_answer_trapi_request_supports_numeric_qnode_constraints(
+    qlever_test_server: tuple[str, int],
+) -> None:
+    host, port = qlever_test_server
+
+    response = answer_trapi_request(
+        numeric_constraint_request(),
+        host_name=host,
+        port=port,
+        limit=10,
+        resource_id="infores:qlever-trapi-test",
+        subclass_depth=0,
+    )
+
+    node = response["message"]["knowledge_graph"]["nodes"]["NCBIGene:836"]
+    assert node["name"] == "CASP3"
+    assert "length" not in node
+    assert response["message"]["results"] == [
+        {
+            "node_bindings": {
+                "n0": [{"id": "NCBIGene:836"}],
+            },
+            "analyses": [
+                {
+                    "resource_id": "infores:qlever-trapi-test",
+                    "edge_bindings": {},
+                }
+            ],
+        }
+    ]
+
+
+def test_answer_trapi_request_returns_publications_attribute(
+    qlever_test_server: tuple[str, int],
+) -> None:
+    host, port = qlever_test_server
+
+    response = answer_trapi_request(
+        publications_request(),
+        host_name=host,
+        port=port,
+        limit=10,
+        resource_id="infores:qlever-trapi-test",
+        subclass_depth=0,
+    )
+
+    edge = response["message"]["knowledge_graph"]["edges"]["urn:uuid:edge-publications"]
+    assert {
+        "original_attribute_name": "publications",
+        "attribute_type_id": "biolink:publications",
+        "value": ["PMID:123"],
+        "value_type_id": "linkml:Uriorcurie",
+    } in edge["attributes"]
+
+
+def test_answer_trapi_request_maps_known_biolink_attributes_without_override(
+    qlever_test_server: tuple[str, int],
+) -> None:
+    host, port = qlever_test_server
+
+    response = answer_trapi_request(
+        p_value_request(),
+        host_name=host,
+        port=port,
+        limit=10,
+        resource_id="infores:qlever-trapi-test",
+        subclass_depth=0,
+    )
+
+    edge = response["message"]["knowledge_graph"]["edges"]["urn:uuid:edge-p-value"]
+    assert any(
+        attribute["original_attribute_name"] == "p_value"
+        and attribute["attribute_type_id"] == "biolink:p_value"
+        and attribute["value"] == 0.000007
+        for attribute in edge["attributes"]
+    )
+
+
+def test_answer_trapi_request_maps_unknown_attributes_to_generic_attribute(
+    qlever_test_server: tuple[str, int],
+) -> None:
+    host, port = qlever_test_server
+
+    response = answer_trapi_request(
+        generic_attribute_request(),
+        host_name=host,
+        port=port,
+        limit=10,
+        resource_id="infores:qlever-trapi-test",
+        subclass_depth=0,
+    )
+
+    edge = response["message"]["knowledge_graph"]["edges"]["urn:uuid:edge-non-biolink-attribute"]
+    assert {
+        "original_attribute_name": "non_biolink_attribute",
+        "attribute_type_id": "biolink:Attribute",
+        "value": "xxx123",
+    } in edge["attributes"]
+
+
+def test_answer_trapi_request_reconstructs_nested_preformatted_attributes(
+    qlever_test_server: tuple[str, int],
+) -> None:
+    host, port = qlever_test_server
+
+    response = answer_trapi_request(
+        json_attribute_request(),
+        host_name=host,
+        port=port,
+        limit=10,
+        resource_id="infores:qlever-trapi-test",
+        subclass_depth=0,
+    )
+
+    edge = response["message"]["knowledge_graph"]["edges"]["urn:uuid:edge-json-attributes"]
+    attributes = edge["attributes"]
+    assert {
+        "original_attribute_name": "publications",
+        "attribute_type_id": "biolink:publications",
+        "value": ["PMID:123"],
+        "value_type_id": "linkml:Uriorcurie",
+    } in attributes
+    assert {"attribute_type_id": "json_attribute_1", "value": "json_value_1"} in attributes
+    assert {"attribute_type_id": "json_attribute_2"} in attributes
+    assert {
+        "attribute_type_id": "json_attribute_3",
+        "value": "json_value_3",
+        "attributes": [
+            {
+                "attribute_type_id": "nested_json_attribute_1",
+                "value": "nested_json_value_1",
+            }
+        ],
+    } in attributes
+
+
+def test_answer_trapi_request_supports_multi_qualifier_sets(
+    qlever_test_server: tuple[str, int],
+) -> None:
+    host, port = qlever_test_server
+
+    response = answer_trapi_request(
+        multi_qualifier_request(),
+        host_name=host,
+        port=port,
+        limit=10,
+        resource_id="infores:qlever-trapi-test",
+        subclass_depth=0,
+    )
+
+    edge_bindings = response["message"]["results"][0]["analyses"][0]["edge_bindings"]["e0"]
+    assert {binding["id"] for binding in edge_bindings} == {
+        "urn:uuid:qualified-edge",
+        "urn:uuid:qualified-edge-aspect-only",
+    }
+
+
+def test_answer_trapi_request_returns_no_results_for_mismatched_qualifier_value(
+    qlever_test_server: tuple[str, int],
+) -> None:
+    host, port = qlever_test_server
+
+    response = answer_trapi_request(
+        qualifier_request("abundance"),
+        host_name=host,
+        port=port,
+        limit=10,
+        resource_id="infores:qlever-trapi-test",
+        subclass_depth=0,
+    )
+
+    assert response["message"]["knowledge_graph"] == {
+        "nodes": {},
+        "edges": {},
+    }
+    assert response["message"]["results"] == []
+
+
+def test_answer_trapi_request_ignores_empty_qualifier_sets(
+    qlever_test_server: tuple[str, int],
+) -> None:
+    host, port = qlever_test_server
+
+    response = answer_trapi_request(
+        empty_qualifier_request(),
+        host_name=host,
+        port=port,
+        limit=10,
+        resource_id="infores:qlever-trapi-test",
+        subclass_depth=0,
+    )
+
+    assert response["message"]["results"][0]["analyses"][0]["edge_bindings"] == {
+        "e0": [{"id": "urn:uuid:qualified-edge"}],
+    }
+
+
+def test_answer_trapi_request_falls_back_to_transpiler_source_when_primary_missing(
+    qlever_test_server: tuple[str, int],
+) -> None:
+    host, port = qlever_test_server
+
+    response = answer_trapi_request(
+        missing_primary_source_request(),
+        host_name=host,
+        port=port,
+        limit=10,
+        resource_id="infores:qlever-trapi-test",
+        subclass_depth=0,
+    )
+
+    edge = response["message"]["knowledge_graph"]["edges"]["urn:uuid:edge-missing-primary"]
+    assert edge["sources"] == [
+        {
+            "resource_id": "infores:qlever-trapi-test",
+            "resource_role": "primary_knowledge_source",
+        }
+    ]
+
+
+def test_answer_trapi_request_keeps_node_only_queries_exact_without_subclass_reasoning(
+    qlever_test_server: tuple[str, int],
+) -> None:
+    host, port = qlever_test_server
+
+    response = answer_trapi_request(
+        node_only_root_request(),
+        host_name=host,
+        port=port,
+        limit=10,
+        resource_id="infores:qlever-trapi-test",
+        subclass_depth=1,
+    )
+
+    assert response["message"]["knowledge_graph"]["edges"] == {}
+    assert response["message"]["results"] == [
+        {
+            "node_bindings": {
+                "n0": [{"id": "MONDO:0000001"}],
+            },
+            "analyses": [
+                {
+                    "resource_id": "infores:qlever-trapi-test",
+                    "edge_bindings": {},
+                }
+            ],
+        }
+    ]
+    assert response["message"]["auxiliary_graphs"] == {}
+
+
+def test_answer_trapi_request_preserves_inverse_subclass_orientation(
+    qlever_test_server: tuple[str, int],
+) -> None:
+    host, port = qlever_test_server
+
+    response = answer_trapi_request(
+        inverse_subclass_request(),
+        host_name=host,
+        port=port,
+        limit=10,
+        resource_id="infores:qlever-trapi-test",
+        subclass_depth=1,
+    )
+
+    result = response["message"]["results"][0]
+    inferred_edge_id = result["analyses"][0]["edge_bindings"]["e0"][0]["id"]
+    inferred_edge = response["message"]["knowledge_graph"]["edges"][inferred_edge_id]
+
+    assert result["node_bindings"] == {
+        "n0": [{"id": "HP:0000118"}],
+        "n1": [{"id": "MONDO:0005148"}],
+    }
+    assert response["message"]["auxiliary_graphs"] == {
+        "aux_" + inferred_edge_id.split(":", 1)[1]: {
+            "attributes": [],
+            "edges": [
+                "urn:uuid:t2d-has-phenotype",
+                "urn:uuid:albuminuria-subclass-phenotype",
+            ],
+        }
+    }
+    assert inferred_edge["subject"] == "MONDO:0005148"
+    assert inferred_edge["predicate"] == "biolink:has_phenotype"
+    assert inferred_edge["object"] == "HP:0000118"
+    assert inferred_edge["sources"] == [
+        {
+            "resource_id": "infores:qlever-trapi-test",
+            "resource_role": "primary_knowledge_source",
+        }
+    ]
+
+
+def test_answer_trapi_request_returns_empty_payload_for_empty_query_graph() -> None:
+    response = answer_trapi_request(empty_request(), subclass_depth=1)
+
+    assert response == {
+        "message": {
+            "query_graph": empty_request()["message"]["query_graph"],
+            "knowledge_graph": {
+                "nodes": {},
+                "edges": {},
+            },
+            "results": [],
+            "auxiliary_graphs": {},
+        }
+    }
+
+
 @pytest.fixture()
 def trapi_service_server(qlever_test_server: tuple[str, int]) -> tuple[str, int]:
     qlever_host, qlever_port = qlever_test_server
@@ -800,9 +1709,7 @@ def test_http_service_query_endpoint_returns_trapi_envelope(
 def test_http_service_returns_400_for_invalid_request(trapi_service_server: tuple[str, int]) -> None:
     host, port = trapi_service_server
     bad_request = sample_request()
-    bad_request["message"]["query_graph"]["nodes"]["n2"] = {
-        "categories": ["biolink:Gene"],
-    }
+    bad_request["message"]["query_graph"]["nodes"]["n0"]["is_set"] = True
 
     status, response = http_json_request(
         "POST",
@@ -812,7 +1719,7 @@ def test_http_service_returns_400_for_invalid_request(trapi_service_server: tupl
 
     assert status == 400
     assert response["status"] == "BadRequest"
-    assert "participate in at least one qedge" in response["description"]
+    assert "is_set=true" in response["description"]
 
 
 def test_http_service_returns_404_for_unknown_path(trapi_service_server: tuple[str, int]) -> None:

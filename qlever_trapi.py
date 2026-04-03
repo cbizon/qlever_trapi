@@ -27,10 +27,13 @@ from find_paths import (
 
 RDF_TYPE = RDF_NS + "type"
 RDF_STATEMENT = RDF_NS + "Statement"
+RDF_PROPERTY = RDF_NS + "Property"
 RDF_SUBJECT = RDF_NS + "subject"
 RDF_PREDICATE = RDF_NS + "predicate"
 RDF_OBJECT = RDF_NS + "object"
+XSD_NS = "http://www.w3.org/2001/XMLSchema#"
 RDFS_LABEL = RDFS_NS + "label"
+RDFS_CLASS = RDFS_NS + "Class"
 RDFS_SUBCLASS_OF = RDFS_NS + "subClassOf"
 RDFS_SUBPROPERTY_OF = RDFS_NS + "subPropertyOf"
 BIOLINK_SUBCLASS_OF = BIOLINK_VOCAB + "subclass_of"
@@ -63,13 +66,21 @@ STRUCTURAL_EDGE_PREDICATES = {
     KGXTR_TRAVERSAL_TO,
 }
 NON_ALPHANUMERIC_RE = re.compile(r"[^A-Za-z0-9_]+")
+CAMEL_BOUNDARY_RE = re.compile(r"(?<!^)(?=[A-Z])")
 TOOLKIT = Toolkit()
 ALL_BIOLINK_ENUMS = tuple(TOOLKIT.view.all_enums().keys())
+ATTRIBUTE_TYPE_OVERRIDES = {
+    "publications": {
+        "attribute_type_id": "biolink:publications",
+        "value_type_id": "linkml:Uriorcurie",
+    }
+}
+LINKED_RESOURCE_SLOTS = ("sources", "attributes")
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Translate a one-hop TRAPI query into a QLever query or serve it over HTTP."
+        description="Translate a TRAPI query graph into a QLever query or serve it over HTTP."
     )
     parser.add_argument(
         "input",
@@ -146,6 +157,56 @@ def ensure_string_list(value: Any, field_name: str) -> list[str]:
     return value
 
 
+def ensure_id_list(value: Any, field_name: str) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, int) and not isinstance(value, bool):
+        return [str(value)]
+    if not isinstance(value, list):
+        raise ValueError(f"{field_name} must be a string, integer, or list of strings/integers")
+
+    ids: list[str] = []
+    for item in value:
+        if isinstance(item, str):
+            ids.append(item)
+        elif isinstance(item, int) and not isinstance(item, bool):
+            ids.append(str(item))
+        else:
+            raise ValueError(f"{field_name} must be a string, integer, or list of strings/integers")
+    return ids
+
+
+def ensure_constraints(value: Any, field_name: str) -> list[dict[str, Any]]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f"{field_name} must be a list")
+
+    constraints: list[dict[str, Any]] = []
+    for index, constraint in enumerate(value):
+        if not isinstance(constraint, dict):
+            raise ValueError(f"{field_name}[{index}] must be an object")
+        if constraint.get("not"):
+            raise ValueError(f"Unsupported attribute constraint: {constraint}")
+        if "id" not in constraint or "value" not in constraint:
+            raise ValueError(f"Invalid attribute constraint: {constraint}")
+        operator = constraint.get("operator", "===")
+        if operator not in {"==", "==="}:
+            raise ValueError(f"Unsupported attribute constraint: {constraint}")
+        if operator == "==" and isinstance(constraint["value"], list):
+            raise ValueError(f"Unsupported attribute constraint: {constraint}")
+        constraints.append(
+            {
+                "id": constraint["id"],
+                "value": constraint["value"],
+                "operator": operator,
+            }
+        )
+    return constraints
+
+
 def ensure_qualifier_constraints(value: Any, field_name: str) -> list[dict[str, Any]]:
     if value is None:
         return []
@@ -184,14 +245,32 @@ def ensure_qualifier_constraints(value: Any, field_name: str) -> list[dict[str, 
 def validate_qnode(qnode_id: str, qnode: dict[str, Any]) -> dict[str, Any]:
     if qnode.get("is_set") is True:
         raise ValueError(f"qnode {qnode_id} uses is_set=true, which is not supported yet")
-    unsupported = {"constraints", "set_interpretation"} & set(qnode)
+    supported_fields = {"ids", "categories", "constraints", "set_interpretation", "is_set"}
+    unsupported = {
+        field_name
+        for field_name, field_value in qnode.items()
+        if field_name not in supported_fields and field_value is not None
+    }
     if unsupported:
         field_list = ", ".join(sorted(unsupported))
         raise ValueError(f"qnode {qnode_id} uses unsupported fields: {field_list}")
+
+    categories = ensure_string_list(qnode.get("categories"), f"qnode {qnode_id}.categories")
+    if not categories:
+        categories = ["biolink:NamedThing"]
+
+    set_interpretation = qnode.get("set_interpretation", "BATCH")
+    if set_interpretation not in {"BATCH", "ALL", "MANY"}:
+        raise ValueError(f"qnode {qnode_id} has unsupported set_interpretation={set_interpretation!r}")
+    if set_interpretation == "MANY":
+        raise NotImplementedError("This feature is currently not implemented: set_interpretation=MANY")
+
     return {
         "qnode_id": qnode_id,
-        "ids": ensure_string_list(qnode.get("ids"), f"qnode {qnode_id}.ids"),
-        "categories": ensure_string_list(qnode.get("categories"), f"qnode {qnode_id}.categories"),
+        "ids": ensure_id_list(qnode.get("ids"), f"qnode {qnode_id}.ids"),
+        "categories": categories,
+        "constraints": ensure_constraints(qnode.get("constraints"), f"qnode {qnode_id}.constraints"),
+        "set_interpretation": set_interpretation,
     }
 
 
@@ -203,7 +282,16 @@ def validate_qedge(qedge_id: str, qedge: dict[str, Any], qnodes: dict[str, Any])
     if not isinstance(object_, str) or object_ not in qnodes:
         raise ValueError(f"qedge {qedge_id} object must reference an existing qnode")
 
-    unsupported = {"attribute_constraints"} & set(qedge)
+    unsupported = set(qedge) - {
+        "subject",
+        "object",
+        "predicates",
+        "predicate",
+        "relation",
+        "knowledge_type",
+        "qualifier_constraints",
+        "attribute_constraints",
+    }
     if unsupported:
         field_list = ", ".join(sorted(unsupported))
         raise ValueError(f"qedge {qedge_id} uses unsupported fields: {field_list}")
@@ -211,15 +299,22 @@ def validate_qedge(qedge_id: str, qedge: dict[str, Any], qnodes: dict[str, Any])
     knowledge_type = qedge.get("knowledge_type")
     if knowledge_type not in (None, "lookup"):
         raise ValueError(f"qedge {qedge_id} knowledge_type={knowledge_type!r} is not supported")
+    relation = qedge.get("relation")
+    if relation is not None:
+        raise ValueError(f"qedge {qedge_id} relation={relation!r} is not supported")
 
     return {
         "qedge_id": qedge_id,
         "subject": subject,
         "object": object_,
-        "predicates": ensure_string_list(qedge.get("predicates"), f"qedge {qedge_id}.predicates"),
+        "predicates": ensure_string_list(qedge.get("predicates", qedge.get("predicate")), f"qedge {qedge_id}.predicates"),
         "qualifier_constraints": ensure_qualifier_constraints(
             qedge.get("qualifier_constraints"),
             f"qedge {qedge_id}.qualifier_constraints",
+        ),
+        "attribute_constraints": ensure_constraints(
+            qedge.get("attribute_constraints"),
+            f"qedge {qedge_id}.attribute_constraints",
         ),
     }
 
@@ -235,10 +330,21 @@ def normalize_trapi_request(request: dict[str, Any], subclass_depth: int = 1) ->
 
     qnodes = query_graph.get("nodes")
     qedges = query_graph.get("edges")
-    if not isinstance(qnodes, dict) or not qnodes:
-        raise ValueError("query_graph.nodes must be a non-empty object")
-    if not isinstance(qedges, dict) or not qedges:
-        raise ValueError("query_graph.edges must be a non-empty object")
+    if not isinstance(qnodes, dict):
+        raise ValueError("query_graph.nodes must be an object")
+    if not isinstance(qedges, dict):
+        raise ValueError("query_graph.edges must be an object")
+    if not qnodes and not qedges:
+        return {
+            "message": message,
+            "query_graph": query_graph,
+            "original_qnodes": {},
+            "original_qedges": {},
+            "qnodes": {},
+            "qedges": {},
+            "referenced_qnodes": set(),
+            "orphan_qnodes": set(),
+        }
 
     normalized_qnodes: dict[str, Any] = {}
     for qnode_id, raw_qnode in qnodes.items():
@@ -255,13 +361,7 @@ def normalize_trapi_request(request: dict[str, Any], subclass_depth: int = 1) ->
         normalized_qedges[qedge_id] = normalized_qedge
         referenced_qnodes.add(normalized_qedge["subject"])
         referenced_qnodes.add(normalized_qedge["object"])
-
-    unreferenced_qnodes = [qnode_id for qnode_id in normalized_qnodes if qnode_id not in referenced_qnodes]
-    if unreferenced_qnodes:
-        raise ValueError(
-            "Every qnode must participate in at least one qedge: "
-            + ", ".join(unreferenced_qnodes)
-        )
+    orphan_qnodes = {qnode_id for qnode_id in normalized_qnodes if qnode_id not in referenced_qnodes}
 
     internal_qnodes, internal_qedges = rewrite_query_graph_for_subclass(
         normalized_qnodes,
@@ -278,6 +378,8 @@ def normalize_trapi_request(request: dict[str, Any], subclass_depth: int = 1) ->
         "original_qedges": normalized_qedges,
         "qnodes": internal_qnodes,
         "qedges": internal_qedges,
+        "referenced_qnodes": referenced_qnodes,
+        "orphan_qnodes": orphan_qnodes,
     }
 
 
@@ -289,12 +391,168 @@ def safe_name(value: str) -> str:
     return value.replace(" ", "_")
 
 
+def space_case(value: str | list[str]) -> str | list[str]:
+    if isinstance(value, list):
+        return [space_case(item) for item in value]
+    if not isinstance(value, str):
+        raise ValueError(f"Unsupported value for space_case: {type(value).__name__}")
+    stripped = value.removeprefix("biolink:")
+    if "_" in stripped:
+        words = stripped.replace("_", " ")
+    else:
+        words = CAMEL_BOUNDARY_RE.sub(" ", stripped)
+    return " ".join(words.split()).lower()
+
+
+def snake_case(value: str | list[str]) -> str | list[str]:
+    if isinstance(value, list):
+        return [snake_case(item) for item in value]
+    if not isinstance(value, str):
+        raise ValueError(f"Unsupported value for snake_case: {type(value).__name__}")
+    return str(space_case(value)).replace(" ", "_")
+
+
+def pascal_case(value: str | list[str]) -> str | list[str]:
+    if isinstance(value, list):
+        return [pascal_case(item) for item in value]
+    if not isinstance(value, str):
+        raise ValueError(f"Unsupported value for pascal_case: {type(value).__name__}")
+    return "".join(part.capitalize() for part in str(space_case(value)).split())
+
+
 def custom_slot_iri(key: str) -> str:
     return KGX_SLOT_NS + quote(safe_name(key), safe="._-")
 
 
 def enum_value_iri(enum_name: str, value: str) -> str:
     return BIOLINK_ENUM_NS + quote(enum_name, safe="._-/") + "/" + quote(value, safe="._-")
+
+
+def sparql_string_literal(value: str) -> str:
+    escaped = (
+        value.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+        .replace("\t", "\\t")
+    )
+    return f'"{escaped}"'
+
+
+def sparql_literal(value: Any) -> str:
+    if isinstance(value, bool):
+        literal = "true" if value else "false"
+        return f'"{literal}"^^<{XSD_NS}boolean>'
+    if isinstance(value, int):
+        return f'"{value}"^^<{XSD_NS}integer>'
+    if isinstance(value, float):
+        return f'"{value}"^^<{XSD_NS}double>'
+    if isinstance(value, str):
+        return sparql_string_literal(value)
+    raise ValueError(f"Unsupported property type: {type(value).__name__}.")
+
+
+def slot_iri(key: str) -> str:
+    if key.startswith(("http://", "https://", "urn:")):
+        return key
+    if key.startswith("biolink:"):
+        return curie_to_iri(key)
+    element = TOOLKIT.get_element(key)
+    if element is not None and getattr(element, "slot_uri", None):
+        return curie_to_iri(element.slot_uri)
+    return custom_slot_iri(key)
+
+
+def looks_like_iri_or_curie(value: str) -> bool:
+    return ":" in value and not value.startswith(" ")
+
+
+def constraint_value_term(constraint_id: str, value: Any) -> str:
+    if isinstance(value, list):
+        raise ValueError(f"Unsupported property type: {type(value).__name__}.")
+    slot_name = constraint_id.removeprefix("biolink:")
+    element = TOOLKIT.get_element(slot_name)
+    enum_name = getattr(element, "range", None) if element is not None else None
+
+    if isinstance(value, str):
+        if isinstance(enum_name, str) and enum_name.endswith("Enum") and TOOLKIT.is_permissible_value_of_enum(enum_name, value):
+            return iri_term(enum_value_iri(enum_name, value))
+        if looks_like_iri_or_curie(value):
+            return iri_term(curie_to_iri(value))
+    return sparql_literal(value)
+
+
+def descendant_predicates(predicate: str) -> list[str]:
+    element = TOOLKIT.get_element(space_case(predicate))
+    if element is None:
+        raise ValueError(f"Invalid predicate in query: {predicate}")
+    descendants = TOOLKIT.get_descendants(space_case(predicate))
+    return [
+        f"biolink:{snake_case(descendant)}"
+        for descendant in descendants
+        if (
+            TOOLKIT.get_element(descendant).annotations.get("canonical_predicate", False)
+            or ("symmetric" in TOOLKIT.get_element(descendant) and TOOLKIT.get_element(descendant).symmetric)
+        )
+    ]
+
+
+def predicate_match_modes(predicates: list[str]) -> list[dict[str, Any]]:
+    if "biolink:related_to" in predicates:
+        predicates = []
+    queried_predicates = list(predicates)
+    inverse_predicates: list[str] = []
+    symmetric = True
+    for predicate in predicates:
+        element = TOOLKIT.get_element(space_case(predicate))
+        if element is None:
+            raise ValueError(f"Invalid predicate in query: {predicate}")
+        inverse_predicate = getattr(element, "inverse", None)
+        if inverse_predicate is not None:
+            inverse_predicates.append(f"biolink:{snake_case(inverse_predicate)}")
+        if getattr(element, "symmetric", False):
+            inverse_predicates.append(predicate)
+        else:
+            symmetric = False
+
+    if not predicates:
+        return [
+            {"reverse": False, "predicates": []},
+            {"reverse": True, "predicates": []},
+        ]
+
+    forward_predicates = dedupe(
+        predicate
+        for requested_predicate in predicates
+        for predicate in descendant_predicates(requested_predicate)
+    )
+    reverse_predicates = dedupe(
+        predicate
+        for requested_predicate in inverse_predicates
+        for predicate in descendant_predicates(requested_predicate)
+    )
+
+    if queried_predicates and not forward_predicates and not reverse_predicates:
+        raise ValueError(
+            "A query was made with the following predicates, but none of them or their descendants are in the graph queried: "
+            + ", ".join(queried_predicates)
+        )
+
+    if symmetric:
+        allowed = dedupe(forward_predicates + reverse_predicates)
+        return [
+            {"reverse": False, "predicates": allowed},
+            {"reverse": True, "predicates": allowed},
+        ]
+
+    if forward_predicates and reverse_predicates:
+        return [
+            {"reverse": False, "predicates": forward_predicates},
+            {"reverse": True, "predicates": reverse_predicates},
+        ]
+    if reverse_predicates:
+        return [{"reverse": True, "predicates": reverse_predicates}]
+    return [{"reverse": False, "predicates": forward_predicates}]
 
 
 def assign_indexes(records: dict[str, dict[str, Any]]) -> None:
@@ -378,8 +636,8 @@ def qedge_predicate_var(qedge: dict[str, Any]) -> str:
     return f"?predicate_{qedge['index']}_{safe_var_suffix(qedge['qedge_id'])}"
 
 
-def qedge_predicate_filter_var(qedge: dict[str, Any]) -> str:
-    return f"?predicate_filter_{qedge['index']}_{safe_var_suffix(qedge['qedge_id'])}"
+def qedge_predicate_filter_var(qedge: dict[str, Any], mode_index: int) -> str:
+    return f"?predicate_filter_{qedge['index']}_{safe_var_suffix(qedge['qedge_id'])}_{mode_index}"
 
 
 def qedge_qualifier_predicate_var(qedge: dict[str, Any], constraint_index: int, filter_index: int) -> str:
@@ -388,6 +646,14 @@ def qedge_qualifier_predicate_var(qedge: dict[str, Any], constraint_index: int, 
 
 def qedge_qualifier_value_var(qedge: dict[str, Any], constraint_index: int, filter_index: int) -> str:
     return f"?qualifier_value_{qedge['index']}_{constraint_index}_{filter_index}"
+
+
+def qedge_orientation_var(qedge: dict[str, Any]) -> str:
+    return f"?orientation_{qedge['index']}_{safe_var_suffix(qedge['qedge_id'])}"
+
+
+def qnode_existence_var(qnode: dict[str, Any]) -> str:
+    return f"?node_type_{qnode['index']}_{safe_var_suffix(qnode['qnode_id'])}"
 
 
 def qualifier_type_name(qualifier_type_id: str) -> str:
@@ -445,10 +711,36 @@ def qualifier_type_id_from_predicate(predicate: str) -> str | None:
     return None
 
 
-def decode_qualifier_value(value: str) -> Any:
+def decode_enum_value(value: str) -> Any:
     if value.startswith(BIOLINK_ENUM_NS):
         return unquote(value.rsplit("/", 1)[1])
     return decode_typed_literal(value)
+
+
+def decode_qualifier_value(value: str) -> Any:
+    return decode_enum_value(value)
+
+
+def build_constraint_lines(
+    variable: str,
+    constraints: list[dict[str, Any]],
+    indent: str = "  ",
+) -> list[str]:
+    lines: list[str] = []
+    for constraint in constraints:
+        lines.append(
+            f"{indent}{variable} <{slot_iri(constraint['id'])}> {constraint_value_term(constraint['id'], constraint['value'])} ."
+        )
+    return lines
+
+
+def bind_orphan_qnode(lines: list[str], qnode: dict[str, Any]) -> None:
+    lines.append(
+        f"  {qnode_binding_var(qnode)} <{RDF_TYPE}> {qnode_existence_var(qnode)} ."
+    )
+    lines.append(
+        f"  FILTER({qnode_existence_var(qnode)} != <{RDF_STATEMENT}> && {qnode_existence_var(qnode)} != <{RDF_PROPERTY}> && {qnode_existence_var(qnode)} != <{RDFS_CLASS}>)"
+    )
 
 
 def append_node_filters(lines: list[str], qnode: dict[str, Any]) -> None:
@@ -462,49 +754,99 @@ def append_node_filters(lines: list[str], qnode: dict[str, Any]) -> None:
         category_var = qnode_category_var(qnode)
         lines.append(f"  {values_clause(category_var, categories)}")
         lines.append(f"  {variable} <{RDF_TYPE}>/<{RDFS_SUBCLASS_OF}>* {category_var} .")
+    lines.extend(build_constraint_lines(variable, qnode.get("constraints", [])))
+
+def build_qualifier_set_lines(
+    qedge: dict[str, Any],
+    qualifier_set: list[dict[str, str]],
+    constraint_index: int,
+    indent: str = "    ",
+) -> list[str]:
+    lines: list[str] = []
+    for filter_index, qualifier_filter in enumerate(qualifier_set):
+        predicate_var = qedge_qualifier_predicate_var(qedge, constraint_index, filter_index)
+        value_var = qedge_qualifier_value_var(qedge, constraint_index, filter_index)
+        lines.append(
+            f"{indent}{values_clause(predicate_var, qualifier_predicate_iris(qualifier_filter['qualifier_type_id']))}"
+        )
+        lines.append(
+            f"{indent}{values_clause(value_var, qualifier_value_iris(qualifier_filter['qualifier_type_id'], qualifier_filter['qualifier_value']))}"
+        )
+        lines.append(f"{indent}{qedge_binding_var(qedge)} {predicate_var} {value_var} .")
+    return lines
 
 
-def append_edge_filters(lines: list[str], qedge: dict[str, Any]) -> None:
-    predicates = qedge["predicates"]
-    predicate_iris = [curie_to_iri(value) for value in predicates]
-    if predicate_iris:
-        predicate_var = qedge_predicate_filter_var(qedge)
-        lines.append(f"  {values_clause(predicate_var, predicate_iris)}")
-        lines.append(f"  {qedge_predicate_var(qedge)} <{RDFS_SUBPROPERTY_OF}>* {predicate_var} .")
-
-    qualifier_constraint_lines = build_qualifier_constraint_lines(qedge)
-    lines.extend(qualifier_constraint_lines)
-
-
-def build_qualifier_constraint_lines(qedge: dict[str, Any]) -> list[str]:
-    constraints = qedge.get("qualifier_constraints", [])
-    branches: list[str] = []
-    for constraint_index, constraint in enumerate(constraints):
+def build_qualifier_constraint_union_lines(
+    qedge: dict[str, Any],
+    indent: str = "    ",
+) -> list[str]:
+    branches: list[list[str]] = []
+    for constraint_index, constraint in enumerate(qedge.get("qualifier_constraints", [])):
         qualifier_set = constraint.get("qualifier_set", [])
         if not qualifier_set:
             continue
-        branch_lines = ["  {"]
-        for filter_index, qualifier_filter in enumerate(qualifier_set):
-            predicate_var = qedge_qualifier_predicate_var(qedge, constraint_index, filter_index)
-            value_var = qedge_qualifier_value_var(qedge, constraint_index, filter_index)
-            branch_lines.append(
-                f"    {values_clause(predicate_var, qualifier_predicate_iris(qualifier_filter['qualifier_type_id']))}"
+        branch_lines = [f"{indent}{{"]
+        branch_lines.extend(
+            build_qualifier_set_lines(
+                qedge,
+                qualifier_set,
+                constraint_index,
+                indent=indent + "  ",
             )
-            branch_lines.append(
-                f"    {values_clause(value_var, qualifier_value_iris(qualifier_filter['qualifier_type_id'], qualifier_filter['qualifier_value']))}"
-            )
-            branch_lines.append(f"    {qedge_binding_var(qedge)} {predicate_var} {value_var} .")
-        branch_lines.append("  }")
-        branches.append("\n".join(branch_lines))
+        )
+        branch_lines.append(f"{indent}}}")
+        branches.append(branch_lines)
 
     if not branches:
         return []
 
     lines: list[str] = []
-    for index, branch in enumerate(branches):
+    for index, branch_lines in enumerate(branches):
         if index:
+            lines.append(f"{indent}UNION")
+        lines.extend(branch_lines)
+    return lines
+
+
+def build_qedge_mode_lines(
+    normalized_request: dict[str, Any],
+    qedge: dict[str, Any],
+    mode: dict[str, Any],
+    mode_index: int,
+) -> list[str]:
+    subject_var = qnode_binding_var(normalized_request["qnodes"][qedge["subject"]])
+    object_var = qnode_binding_var(normalized_request["qnodes"][qedge["object"]])
+    predicate_var = qedge_predicate_var(qedge)
+    orientation = "reverse" if mode["reverse"] else "forward"
+    statement_subject_var = object_var if mode["reverse"] else subject_var
+    statement_object_var = subject_var if mode["reverse"] else object_var
+
+    lines = [
+        "  {",
+        f"    {qedge_binding_var(qedge)} a rdf:Statement ;",
+        f"      rdf:subject {statement_subject_var} ;",
+        f"      rdf:predicate {predicate_var} ;",
+        f"      rdf:object {statement_object_var} .",
+    ]
+    predicate_iris = [curie_to_iri(value) for value in mode["predicates"]]
+    if predicate_iris:
+        predicate_filter_var = qedge_predicate_filter_var(qedge, mode_index)
+        lines.append(f"    {values_clause(predicate_filter_var, predicate_iris)}")
+        lines.append(f"    {predicate_var} <{RDFS_SUBPROPERTY_OF}>* {predicate_filter_var} .")
+    lines.extend(build_constraint_lines(qedge_binding_var(qedge), qedge.get("attribute_constraints", []), indent="    "))
+    lines.extend(build_qualifier_constraint_union_lines(qedge, indent="    "))
+    lines.append(f'    BIND("{orientation}" AS {qedge_orientation_var(qedge)})')
+    lines.append("  }")
+    return lines
+
+
+def build_qedge_union_lines(normalized_request: dict[str, Any], qedge: dict[str, Any]) -> list[str]:
+    modes = predicate_match_modes(qedge["predicates"])
+    lines: list[str] = []
+    for mode_index, mode in enumerate(modes):
+        if mode_index:
             lines.append("  UNION")
-        lines.extend(branch.splitlines())
+        lines.extend(build_qedge_mode_lines(normalized_request, qedge, mode, mode_index))
     return lines
 
 
@@ -516,11 +858,16 @@ def build_trapi_query(normalized_request: dict[str, Any], limit: int | None = No
         for qedge in normalized_request["qedges"].values()
         if not qedge.get("_subclass", False)
     ]
+    orientation_vars = [
+        qedge_orientation_var(qedge)
+        for qedge in normalized_request["qedges"].values()
+        if not qedge.get("_subclass", False)
+    ]
 
     lines = [
         f"PREFIX rdf: <{RDF_NS}>",
         "",
-        f"SELECT DISTINCT {' '.join(qnode_vars + qedge_vars + predicate_vars)}",
+        f"SELECT DISTINCT {' '.join(qnode_vars + qedge_vars + predicate_vars + orientation_vars)}",
         "WHERE {",
     ]
 
@@ -528,15 +875,10 @@ def build_trapi_query(normalized_request: dict[str, Any], limit: int | None = No
         if qedge.get("_subclass", False):
             lines.extend(build_subclass_union_lines(normalized_request, qedge))
         else:
-            lines.extend(
-                [
-                    f"  {qedge_binding_var(qedge)} a rdf:Statement ;",
-                    f"    rdf:subject {qnode_binding_var(normalized_request['qnodes'][qedge['subject']])} ;",
-                    f"    rdf:predicate {qedge_predicate_var(qedge)} ;",
-                    f"    rdf:object {qnode_binding_var(normalized_request['qnodes'][qedge['object']])} .",
-                ]
-            )
-            append_edge_filters(lines, qedge)
+            lines.extend(build_qedge_union_lines(normalized_request, qedge))
+
+    for qnode_id in normalized_request["orphan_qnodes"]:
+        bind_orphan_qnode(lines, normalized_request["qnodes"][qnode_id])
 
     for qnode in normalized_request["qnodes"].values():
         append_node_filters(lines, qnode)
@@ -625,6 +967,18 @@ def unescape_literal(value: str) -> str:
 
 def decode_typed_literal(value: str) -> Any:
     if not value.startswith('"'):
+        if "^^<" in value and value.endswith(">"):
+            text, datatype = value.split("^^<", 1)
+            datatype = datatype[:-1]
+            if datatype.endswith("#boolean"):
+                return text == "true"
+            if datatype.endswith("#integer"):
+                return int(text)
+            if datatype.endswith("#double"):
+                return float(text)
+            return text
+        if value.startswith(BIOLINK_ENUM_NS):
+            return unquote(value.rsplit("/", 1)[1])
         return iri_to_curie(value)
     if '"^^<' not in value:
         return unescape_literal(strip_typed_literal(value))
@@ -667,44 +1021,295 @@ def extract_categories(properties: list[dict[str, str]]) -> list[str]:
     return dedupe(categories)
 
 
+def predicate_original_attribute_name(predicate: str) -> str:
+    if predicate.startswith(KGX_SLOT_NS):
+        return unquote(predicate[len(KGX_SLOT_NS) :])
+    if predicate.startswith(BIOLINK_VOCAB):
+        return unquote(predicate[len(BIOLINK_VOCAB) :])
+    return iri_to_curie(predicate)
+
+
+def attribute_element(predicate: str) -> Any:
+    return TOOLKIT.get_element(predicate_original_attribute_name(predicate).replace("_", " "))
+
+
+def unique_values(values: list[Any]) -> list[Any]:
+    seen: set[str] = set()
+    unique: list[Any] = []
+    for value in values:
+        key = json.dumps(value, sort_keys=True, default=str)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(value)
+    return unique
+
+
+def json_literal_text(value: str) -> str:
+    return unescape_literal(strip_typed_literal(value))
+
+
+def parse_preformatted_attribute_literal(value: str) -> dict[str, Any]:
+    payload = json.loads(json_literal_text(value))
+    if not isinstance(payload, dict):
+        raise ValueError(f"Invalid preformatted attribute payload: {value}")
+    return payload
+
+
+def is_resource_reference(value: str) -> bool:
+    return (
+        not value.startswith(('"', "{", "["))
+        and (
+            value.startswith(("http://", "https://", "urn:"))
+            or (":" in value and value[0].isalnum())
+        )
+    )
+
+
+def build_attribute_metadata(predicate: str) -> dict[str, Any]:
+    original_attribute_name = predicate_original_attribute_name(predicate)
+    if original_attribute_name in ATTRIBUTE_TYPE_OVERRIDES:
+        return {
+            "original_attribute_name": original_attribute_name,
+            **ATTRIBUTE_TYPE_OVERRIDES[original_attribute_name],
+        }
+
+    element = attribute_element(predicate)
+    if element is None:
+        return {
+            "original_attribute_name": original_attribute_name,
+            "attribute_type_id": "biolink:Attribute",
+        }
+
+    metadata = {"original_attribute_name": original_attribute_name}
+    if getattr(element, "slot_uri", None):
+        metadata["attribute_type_id"] = element.slot_uri
+    elif getattr(element, "class_uri", None):
+        metadata["attribute_type_id"] = element.class_uri
+    else:
+        metadata["attribute_type_id"] = "biolink:Attribute"
+
+    range_name = getattr(element, "range", None)
+    if not isinstance(range_name, str):
+        return metadata
+    if range_name == "uriorcurie":
+        value_type_id = "linkml:Uriorcurie"
+    else:
+        range_element = TOOLKIT.get_element(range_name)
+        if range_element is None:
+            value_type_id = None
+        elif getattr(range_element, "uri", None):
+            value_type_id = range_element.uri
+        elif getattr(range_element, "class_uri", None):
+            value_type_id = range_element.class_uri
+        elif getattr(range_element, "slot_uri", None):
+            value_type_id = range_element.slot_uri
+        else:
+            value_type_id = None
+    if value_type_id and value_type_id != metadata["attribute_type_id"]:
+        metadata["value_type_id"] = value_type_id
+    return metadata
+
+
 def build_trapi_attributes(
     properties: list[dict[str, str]],
     exclude_predicates: set[str],
+    all_properties: dict[str, list[dict[str, str]]],
 ) -> list[dict[str, Any]]:
-    attributes: list[dict[str, Any]] = []
-    seen: set[tuple[str, str]] = set()
+    attributes = preformatted_attributes_from_properties(properties, all_properties)
+    grouped_values: dict[str, list[Any]] = {}
     for prop in properties:
         predicate = prop["predicate"]
         if predicate in exclude_predicates:
             continue
-        value = decode_typed_literal(prop["value"])
-        key = (predicate, json.dumps(value, sort_keys=True, default=str))
-        if key in seen:
-            continue
-        seen.add(key)
+        grouped_values.setdefault(predicate, []).append(decode_typed_literal(prop["value"]))
+
+    for predicate, values in grouped_values.items():
+        deduped_values = unique_values(values)
+        element = attribute_element(predicate)
+        if len(deduped_values) > 1 or (element is not None and getattr(element, "multivalued", False)):
+            value: Any = deduped_values
+        else:
+            value = deduped_values[0]
         attributes.append(
             {
-                "attribute_type_id": iri_to_curie(predicate),
+                **build_attribute_metadata(predicate),
                 "value": value,
             }
         )
     return attributes
 
 
-def build_sources(properties: list[dict[str, str]]) -> list[dict[str, str]]:
-    sources: list[dict[str, str]] = []
-    seen: set[tuple[str, str]] = set()
-    for prop in properties:
-        role = SOURCE_ROLE_BY_PREDICATE.get(prop["predicate"])
-        if role is None:
+def preformatted_attribute_from_resource(
+    resource: str,
+    properties: dict[str, list[dict[str, str]]],
+    seen_resources: set[str] | None = None,
+) -> dict[str, Any]:
+    if seen_resources is None:
+        seen_resources = set()
+    if resource in seen_resources:
+        raise ValueError(f"Cyclic attribute resource graph at {resource}")
+    seen_resources = set(seen_resources)
+    seen_resources.add(resource)
+
+    payload: dict[str, Any] = {}
+    grouped_values: dict[str, list[Any]] = {}
+    for prop in properties.get(resource, []):
+        key = predicate_original_attribute_name(prop["predicate"])
+        if key == "attributes":
+            nested_attribute = (
+                preformatted_attribute_from_resource(prop["value"], properties, seen_resources)
+                if is_resource_reference(prop["value"])
+                else parse_preformatted_attribute_literal(prop["value"])
+            )
+            payload.setdefault("attributes", []).append(nested_attribute)
             continue
-        resource_id = str(decode_typed_literal(prop["value"]))
-        key = (resource_id, role)
+        grouped_values.setdefault(key, []).append(decode_typed_literal(prop["value"]))
+
+    for key, values in grouped_values.items():
+        deduped = unique_values(values)
+        payload[key] = deduped if len(deduped) > 1 else deduped[0]
+    return payload
+
+
+def preformatted_attributes_from_properties(
+    properties: list[dict[str, str]],
+    all_properties: dict[str, list[dict[str, str]]],
+) -> list[dict[str, Any]]:
+    attributes: list[dict[str, Any]] = []
+    attributes_predicate = slot_iri("attributes")
+    for prop in properties:
+        if prop["predicate"] != attributes_predicate:
+            continue
+        attributes.append(
+            preformatted_attribute_from_resource(prop["value"], all_properties)
+            if is_resource_reference(prop["value"])
+            else parse_preformatted_attribute_literal(prop["value"])
+        )
+    return unique_values(attributes)
+
+
+def source_references_from_properties(properties: list[dict[str, str]]) -> list[str]:
+    source_predicate = slot_iri("sources")
+    return dedupe(
+        [
+            prop["value"]
+            for prop in properties
+            if prop["predicate"] == source_predicate and not prop["value"].startswith('"')
+        ]
+    )
+
+
+def dedupe_sources(sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    deduped: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, tuple[str, ...]]] = set()
+    for source in sources:
+        key = (
+            source["resource_id"],
+            source["resource_role"],
+            tuple(source.get("upstream_resource_ids", [])),
+        )
         if key in seen:
             continue
         seen.add(key)
-        sources.append({"resource_id": resource_id, "resource_role": role})
-    return sources
+        deduped.append(source)
+    return deduped
+
+
+def nested_sources_from_properties(
+    edge_properties: list[dict[str, str]],
+    properties: dict[str, list[dict[str, str]]],
+) -> list[dict[str, Any]]:
+    sources: list[dict[str, Any]] = []
+    resource_id_predicate = slot_iri("resource_id")
+    resource_role_predicate = slot_iri("resource_role")
+    upstream_resource_ids_predicate = slot_iri("upstream_resource_ids")
+
+    for source_resource in source_references_from_properties(edge_properties):
+        source_properties = properties.get(source_resource, [])
+        by_predicate = resource_values_by_predicate(source_properties)
+        resource_id_values = by_predicate.get(resource_id_predicate, [])
+        resource_role_values = by_predicate.get(resource_role_predicate, [])
+        if not resource_id_values or not resource_role_values:
+            continue
+        source: dict[str, Any] = {
+            "resource_id": str(decode_typed_literal(resource_id_values[0])),
+            "resource_role": str(decode_enum_value(resource_role_values[0])),
+        }
+        upstream_resource_ids = unique_values(
+            [str(decode_typed_literal(value)) for value in by_predicate.get(upstream_resource_ids_predicate, [])]
+        )
+        if upstream_resource_ids:
+            source["upstream_resource_ids"] = upstream_resource_ids
+        sources.append(source)
+    return dedupe_sources(sources)
+
+
+def legacy_sources_from_properties(properties: list[dict[str, str]]) -> list[dict[str, Any]]:
+    sources: list[dict[str, str]] = []
+    grouped_resource_ids = {
+        role: unique_values(
+            [str(decode_typed_literal(prop["value"])) for prop in properties if prop["predicate"] == predicate]
+        )
+        for predicate, role in SOURCE_ROLE_BY_PREDICATE.items()
+    }
+    primary_resource_ids = grouped_resource_ids["primary_knowledge_source"]
+    for resource_id in primary_resource_ids:
+        sources.append({"resource_id": resource_id, "resource_role": "primary_knowledge_source"})
+    for role in ("aggregator_knowledge_source", "supporting_data_source"):
+        for resource_id in grouped_resource_ids[role]:
+            source: dict[str, Any] = {"resource_id": resource_id, "resource_role": role}
+            if primary_resource_ids:
+                source["upstream_resource_ids"] = primary_resource_ids
+            sources.append(source)
+    return dedupe_sources(sources)
+
+
+def terminal_source_ids(sources: list[dict[str, Any]]) -> list[str]:
+    upstream_resource_ids = {
+        upstream_resource_id
+        for source in sources
+        for upstream_resource_id in source.get("upstream_resource_ids", [])
+    }
+    terminal_ids: list[str] = []
+    seen: set[str] = set()
+    for source in sources:
+        resource_id = source["resource_id"]
+        if resource_id in upstream_resource_ids or resource_id in seen:
+            continue
+        seen.add(resource_id)
+        terminal_ids.append(resource_id)
+    return terminal_ids
+
+
+def build_sources(
+    edge_properties: list[dict[str, str]],
+    properties: dict[str, list[dict[str, str]]],
+    resource_id: str,
+) -> list[dict[str, Any]]:
+    sources = nested_sources_from_properties(edge_properties, properties)
+    if not sources:
+        sources = legacy_sources_from_properties(edge_properties)
+
+    if not any(source["resource_role"] == "primary_knowledge_source" for source in sources):
+        return [
+            {
+                "resource_id": resource_id,
+                "resource_role": "primary_knowledge_source",
+            }
+        ]
+
+    if any(source["resource_id"] == resource_id for source in sources):
+        return sources
+
+    sources.append(
+        {
+            "resource_id": resource_id,
+            "resource_role": "aggregator_knowledge_source",
+            "upstream_resource_ids": terminal_source_ids(sources),
+        }
+    )
+    return dedupe_sources(sources)
 
 
 def build_qualifiers(properties: list[dict[str, str]]) -> list[dict[str, Any]]:
@@ -739,7 +1344,11 @@ def resource_values_by_predicate(properties: list[dict[str, str]]) -> dict[str, 
     return values
 
 
-def edge_payload_from_properties(edge_iri: str, properties: dict[str, list[dict[str, str]]]) -> dict[str, Any]:
+def edge_payload_from_properties(
+    edge_iri: str,
+    properties: dict[str, list[dict[str, str]]],
+    resource_id: str,
+) -> dict[str, Any]:
     edge_props = properties.get(edge_iri, [])
     by_predicate = resource_values_by_predicate(edge_props)
     try:
@@ -754,7 +1363,7 @@ def edge_payload_from_properties(edge_iri: str, properties: dict[str, list[dict[
         "predicate": iri_to_curie(predicate_iri),
         "object": iri_to_curie(object_iri),
     }
-    sources = build_sources(edge_props)
+    sources = build_sources(edge_props, properties, resource_id)
     if sources:
         edge_payload["sources"] = sources
     qualifiers = build_qualifiers(edge_props)
@@ -762,7 +1371,13 @@ def edge_payload_from_properties(edge_iri: str, properties: dict[str, list[dict[
         edge_payload["qualifiers"] = qualifiers
     edge_attributes = build_trapi_attributes(
         edge_props,
-        exclude_predicates=STRUCTURAL_EDGE_PREDICATES | set(SOURCE_ROLE_BY_PREDICATE) | qualifier_predicates_in_properties(edge_props),
+        exclude_predicates=(
+            STRUCTURAL_EDGE_PREDICATES
+            | set(SOURCE_ROLE_BY_PREDICATE)
+            | qualifier_predicates_in_properties(edge_props)
+            | {slot_iri("sources"), slot_iri("attributes")}
+        ),
+        all_properties=properties,
     )
     if edge_attributes:
         edge_payload["attributes"] = edge_attributes
@@ -787,7 +1402,8 @@ def build_knowledge_graph_nodes(
             node_payload["name"] = node_name
         node_attributes = build_trapi_attributes(
             node_props,
-            exclude_predicates={RDF_TYPE, *NAME_PREDICATES},
+            exclude_predicates={RDF_TYPE, *NAME_PREDICATES, slot_iri("attributes")},
+            all_properties=properties,
         )
         if node_attributes:
             node_payload["attributes"] = node_attributes
@@ -798,18 +1414,19 @@ def build_knowledge_graph_nodes(
 def build_knowledge_graph_edges(
     edge_iris: list[str],
     properties: dict[str, list[dict[str, str]]],
+    resource_id: str,
 ) -> dict[str, Any]:
     edges: dict[str, Any] = {}
     for edge_iri in edge_iris:
         edge_key = iri_to_curie(edge_iri)
         if edge_key in edges:
             continue
-        edges[edge_key] = edge_payload_from_properties(edge_iri, properties)
+        edges[edge_key] = edge_payload_from_properties(edge_iri, properties, resource_id)
     return edges
 
 
 def support_edge_ids_from_row(qedge: dict[str, Any], row: dict[str, str]) -> list[str]:
-    value = row.get(qedge_binding_var(qedge), "")
+    value = strip_typed_literal(row.get(qedge_binding_var(qedge), ""))
     if not value:
         return []
     return [edge_id for edge_id in value.split("||") if edge_id]
@@ -837,9 +1454,16 @@ def auxiliary_graph_id(edge_id: str) -> str:
     return "aux_" + edge_id.split(":", 1)[1]
 
 
-def build_result_key(node_bindings: dict[str, list[dict[str, Any]]]) -> str:
+def build_result_key(
+    node_bindings: dict[str, list[dict[str, Any]]],
+    qnodes_with_set_interpretation_all: set[str],
+) -> str:
     return json.dumps(
-        {qnode_id: binding[0]["id"] if binding else None for qnode_id, binding in node_bindings.items()},
+        {
+            qnode_id: binding[0]["id"] if binding else None
+            for qnode_id, binding in node_bindings.items()
+            if qnode_id not in qnodes_with_set_interpretation_all
+        },
         sort_keys=True,
     )
 
@@ -864,10 +1488,11 @@ def build_knowledge_graph(
     node_iris: list[str],
     edge_iris: list[str],
     properties: dict[str, list[dict[str, str]]],
+    resource_id: str,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     return (
         build_knowledge_graph_nodes(node_iris, properties),
-        build_knowledge_graph_edges(edge_iris, properties),
+        build_knowledge_graph_edges(edge_iris, properties, resource_id),
     )
 
 
@@ -876,6 +1501,14 @@ def qnodes_with_superclass_nodes(normalized_request: dict[str, Any]) -> set[str]
         qnode_id
         for qnode_id in normalized_request["original_qnodes"]
         if f"{qnode_id}_superclass" in normalized_request["qnodes"]
+    }
+
+
+def qnodes_with_set_interpretation_all(normalized_request: dict[str, Any]) -> set[str]:
+    return {
+        qnode_id
+        for qnode_id, qnode in normalized_request["original_qnodes"].items()
+        if qnode.get("set_interpretation", "BATCH") == "ALL"
     }
 
 
@@ -893,6 +1526,18 @@ def qedges_with_attached_subclass_edges(normalized_request: dict[str, Any]) -> d
     return attached
 
 
+def qedge_orientation_from_row(qedge: dict[str, Any], row: dict[str, str]) -> str:
+    return strip_typed_literal(row.get(qedge_orientation_var(qedge), '"forward"')) or "forward"
+
+
+def merge_binding_lists(existing_bindings: list[dict[str, Any]], new_bindings: list[dict[str, Any]]) -> None:
+    existing_ids = {binding["id"] for binding in existing_bindings}
+    for binding in new_bindings:
+        if binding["id"] not in existing_ids:
+            existing_bindings.append(binding)
+            existing_ids.add(binding["id"])
+
+
 def build_results(
     normalized_request: dict[str, Any],
     rows: list[dict[str, str]],
@@ -902,13 +1547,16 @@ def build_results(
     results: dict[str, dict[str, Any]] = {}
     aux_graphs: dict[str, Any] = {}
     attached_subclass_edges = qedges_with_attached_subclass_edges(normalized_request)
+    set_interpretation_all_qnodes = qnodes_with_set_interpretation_all(normalized_request)
 
     for row in rows:
         node_bindings: dict[str, list[dict[str, Any]]] = {}
         for qnode_id, qnode in normalized_request["original_qnodes"].items():
             actual_node_id = iri_to_curie(row[qnode_binding_var(normalized_request["qnodes"][qnode_id])])
             superclass_qnode_id = f"{qnode_id}_superclass"
-            if superclass_qnode_id in normalized_request["qnodes"]:
+            if qnode_id in set_interpretation_all_qnodes:
+                binding_node_id = actual_node_id
+            elif superclass_qnode_id in normalized_request["qnodes"]:
                 superclass_node_id = iri_to_curie(row[qnode_binding_var(normalized_request["qnodes"][superclass_qnode_id])])
                 binding_node_id = actual_node_id if actual_node_id == superclass_node_id else superclass_node_id
             else:
@@ -917,8 +1565,10 @@ def build_results(
 
         edge_bindings: dict[str, list[dict[str, Any]]] = {}
         for qedge_id, qedge in normalized_request["original_qedges"].items():
-            real_edge_iri = row[qedge_binding_var(normalized_request["qedges"][qedge_id])]
+            internal_qedge = normalized_request["qedges"][qedge_id]
+            real_edge_iri = row[qedge_binding_var(internal_qedge)]
             real_edge_id = iri_to_curie(real_edge_iri)
+            orientation = qedge_orientation_from_row(internal_qedge, row)
 
             support_edge_ids: list[str] = []
             superclass_node_ids: dict[str, str] = {}
@@ -932,7 +1582,15 @@ def build_results(
                     )
 
             if support_edge_ids:
-                inferred_id = inferred_edge_id(real_edge_id, support_edge_ids, superclass_node_ids)
+                if orientation == "reverse":
+                    resolved_superclass_node_ids = {
+                        ("object" if endpoint == "subject" else "subject"): node_id
+                        for endpoint, node_id in superclass_node_ids.items()
+                    }
+                else:
+                    resolved_superclass_node_ids = superclass_node_ids
+
+                inferred_id = inferred_edge_id(real_edge_id, support_edge_ids, resolved_superclass_node_ids)
                 aux_id = auxiliary_graph_id(inferred_id)
                 if aux_id not in aux_graphs:
                     aux_graphs[aux_id] = {
@@ -942,9 +1600,9 @@ def build_results(
                 if inferred_id not in knowledge_graph_edges:
                     real_edge = knowledge_graph_edges[real_edge_id]
                     inferred_edge: dict[str, Any] = {
-                        "subject": superclass_node_ids.get("subject", real_edge["subject"]),
+                        "subject": resolved_superclass_node_ids.get("subject", real_edge["subject"]),
                         "predicate": real_edge["predicate"],
-                        "object": superclass_node_ids.get("object", real_edge["object"]),
+                        "object": resolved_superclass_node_ids.get("object", real_edge["object"]),
                         "attributes": [
                             {
                                 "attribute_type_id": "biolink:knowledge_level",
@@ -971,7 +1629,7 @@ def build_results(
             else:
                 edge_bindings[qedge_id] = [{"id": real_edge_id}]
 
-        result_key = build_result_key(node_bindings)
+        result_key = build_result_key(node_bindings, set_interpretation_all_qnodes)
         if result_key not in results:
             results[result_key] = {
                 "node_bindings": node_bindings,
@@ -984,14 +1642,66 @@ def build_results(
             }
             continue
 
+        existing_node_bindings = results[result_key]["node_bindings"]
+        for qnode_id in set_interpretation_all_qnodes:
+            merge_binding_lists(existing_node_bindings.setdefault(qnode_id, []), node_bindings[qnode_id])
+
         existing_edge_bindings = results[result_key]["analyses"][0]["edge_bindings"]
         for qedge_id, binding_list in edge_bindings.items():
-            existing_edge_ids = {binding["id"] for binding in existing_edge_bindings.setdefault(qedge_id, [])}
-            for binding in binding_list:
-                if binding["id"] not in existing_edge_ids:
-                    existing_edge_bindings[qedge_id].append(binding)
+            merge_binding_lists(existing_edge_bindings.setdefault(qedge_id, []), binding_list)
 
     return list(results.values()), knowledge_graph_edges, aux_graphs
+
+
+def merge_resource_properties(
+    base_properties: dict[str, list[dict[str, str]]],
+    additional_properties: dict[str, list[dict[str, str]]],
+) -> dict[str, list[dict[str, str]]]:
+    merged = {resource: list(resource_properties) for resource, resource_properties in base_properties.items()}
+    for resource, resource_properties in additional_properties.items():
+        merged.setdefault(resource, []).extend(resource_properties)
+    return merged
+
+
+def linked_resource_predicates() -> set[str]:
+    return {slot_iri(slot_name) for slot_name in LINKED_RESOURCE_SLOTS}
+
+
+def linked_resources_from_property_map(properties: dict[str, list[dict[str, str]]]) -> list[str]:
+    predicates = linked_resource_predicates()
+    return dedupe(
+        [
+            prop["value"]
+            for resource_properties in properties.values()
+            for prop in resource_properties
+            if prop["predicate"] in predicates and is_resource_reference(prop["value"])
+        ]
+    )
+
+
+def expand_linked_resource_properties(
+    host_name: str,
+    port: int,
+    properties: dict[str, list[dict[str, str]]],
+    access_token: str | None = None,
+) -> dict[str, list[dict[str, str]]]:
+    expanded = {resource: list(resource_properties) for resource, resource_properties in properties.items()}
+    seen_resources = set(expanded)
+    frontier = [resource for resource in linked_resources_from_property_map(expanded) if resource not in seen_resources]
+
+    while frontier:
+        fetched = fetch_properties_for_resources(
+            host_name,
+            port,
+            frontier,
+            access_token=access_token,
+            include_structural=True,
+        )
+        expanded = merge_resource_properties(expanded, fetched)
+        seen_resources.update(frontier)
+        frontier = [resource for resource in linked_resources_from_property_map(fetched) if resource not in seen_resources]
+
+    return expanded
 
 
 def fetch_properties_for_resources(
@@ -1030,6 +1740,19 @@ def answer_trapi_request(
     subclass_depth: int = 1,
 ) -> dict[str, Any]:
     normalized = normalize_trapi_request(request, subclass_depth=subclass_depth)
+    if not normalized["qnodes"] and not normalized["qedges"]:
+        return {
+            "message": {
+                "query_graph": normalized["query_graph"],
+                "knowledge_graph": {
+                    "nodes": {},
+                    "edges": {},
+                },
+                "results": [],
+                "auxiliary_graphs": {},
+            }
+        }
+
     query = build_trapi_query(normalized, limit=limit)
     result = run_qlever_query(
         host_name,
@@ -1059,7 +1782,13 @@ def answer_trapi_request(
         access_token=access_token,
         include_structural=True,
     )
-    nodes, edges = build_knowledge_graph(node_resources, edge_resources, properties)
+    properties = expand_linked_resource_properties(
+        host_name,
+        port,
+        properties,
+        access_token=access_token,
+    )
+    nodes, edges = build_knowledge_graph(node_resources, edge_resources, properties, resource_id)
     results, edges, auxiliary_graphs = build_results(normalized, rows, resource_id, edges)
 
     return {
@@ -1183,7 +1912,7 @@ def make_trapi_handler(
                     HTTPStatus.BAD_REQUEST,
                 )
                 return
-            except ValueError as exc:
+            except (ValueError, NotImplementedError) as exc:
                 write_json_response(
                     self,
                     response_envelope(

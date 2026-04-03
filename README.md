@@ -81,18 +81,25 @@ The [qlever_trapi.py](/Users/bizon/Projects/Dogsled/qlever_trapi/qlever_trapi.py
 
 Current support:
 - arbitrary qnode/qedge topology, including chains, branches, and cycles
+- orphan qnodes and node-only query graphs
+- empty query graphs
 - qnode `ids`
 - qnode `categories`
-- qedge `predicates`
+- qnode `constraints`
+- qnode `set_interpretation: BATCH|ALL`
+- qedge `predicates` and `predicate`
+- Biolink predicate hierarchy, including canonical, inverse, symmetric, and `related_to`/any-predicate handling
+- qedge `attribute_constraints`
+- qedge qualifier constraints, including qualifier value hierarchy
 - qedge `knowledge_type: lookup` or omitted
-- every qnode must participate in at least one qedge
 - bounded endpoint subclass expansion for pinned qnode `ids`
 - inferred result edges plus `auxiliary_graphs` when subclass support is used
+- TRAPI knowledge graph metadata projection for nodes and edges, including names, categories, attributes, qualifiers, and sources
+- provenance/source reconstruction from nested `sources` resources plus downstream service attribution
+- HTTP service endpoints `GET /health` and `POST /query`
 
-Current non-goals:
-- qualifiers
-- attribute constraints
-- set semantics
+Current gap:
+- `set_interpretation=MANY` is still not implemented
 
 Example:
 
@@ -117,10 +124,6 @@ To run it as an HTTP service:
 ```bash
 uv run python qlever_trapi.py --serve --listen-host 127.0.0.1 --listen-port 8000 --host-name localhost --port 8888 --subclass-depth 1
 ```
-
-Endpoints:
-- `GET /health`
-- `POST /query`
 
 The HTTP service returns a JSON envelope with `status`, `description`, `http_code`, and, on success, `message`.
 
