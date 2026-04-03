@@ -8,7 +8,9 @@ import re
 import sys
 from typing import Any
 import urllib.error
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
+
+from bmt import Toolkit
 
 from find_paths import (
     BIOLINK_VOCAB,
@@ -36,6 +38,8 @@ BIOLINK_SUBCLASS_OF = BIOLINK_VOCAB + "subclass_of"
 KGXTR_NS = "https://w3id.org/kgx/traversal/"
 KGXTR_TRAVERSAL_FROM = KGXTR_NS + "traversal_from"
 KGXTR_TRAVERSAL_TO = KGXTR_NS + "traversal_to"
+KGX_SLOT_NS = "https://w3id.org/kgx/slot/"
+BIOLINK_ENUM_NS = "https://w3id.org/biolink/enum/"
 
 NAME_PREDICATES = (
     RDFS_LABEL,
@@ -59,6 +63,8 @@ STRUCTURAL_EDGE_PREDICATES = {
     KGXTR_TRAVERSAL_TO,
 }
 NON_ALPHANUMERIC_RE = re.compile(r"[^A-Za-z0-9_]+")
+TOOLKIT = Toolkit()
+ALL_BIOLINK_ENUMS = tuple(TOOLKIT.view.all_enums().keys())
 
 
 def parse_args() -> argparse.Namespace:
@@ -140,6 +146,41 @@ def ensure_string_list(value: Any, field_name: str) -> list[str]:
     return value
 
 
+def ensure_qualifier_constraints(value: Any, field_name: str) -> list[dict[str, Any]]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f"{field_name} must be a list")
+
+    constraints: list[dict[str, Any]] = []
+    for index, constraint in enumerate(value):
+        if not isinstance(constraint, dict):
+            raise ValueError(f"{field_name}[{index}] must be an object")
+        qualifier_set = constraint.get("qualifier_set", [])
+        if not isinstance(qualifier_set, list):
+            raise ValueError(f"{field_name}[{index}].qualifier_set must be a list")
+        normalized_set: list[dict[str, str]] = []
+        for filter_index, qualifier_filter in enumerate(qualifier_set):
+            if not qualifier_filter:
+                continue
+            if not isinstance(qualifier_filter, dict):
+                raise ValueError(f"{field_name}[{index}].qualifier_set[{filter_index}] must be an object")
+            qualifier_type_id = qualifier_filter.get("qualifier_type_id")
+            qualifier_value = qualifier_filter.get("qualifier_value")
+            if not isinstance(qualifier_type_id, str):
+                raise ValueError(f"{field_name}[{index}].qualifier_set[{filter_index}].qualifier_type_id must be a string")
+            if not isinstance(qualifier_value, str):
+                raise ValueError(f"{field_name}[{index}].qualifier_set[{filter_index}].qualifier_value must be a string")
+            normalized_set.append(
+                {
+                    "qualifier_type_id": qualifier_type_id,
+                    "qualifier_value": qualifier_value,
+                }
+            )
+        constraints.append({"qualifier_set": normalized_set})
+    return constraints
+
+
 def validate_qnode(qnode_id: str, qnode: dict[str, Any]) -> dict[str, Any]:
     if qnode.get("is_set") is True:
         raise ValueError(f"qnode {qnode_id} uses is_set=true, which is not supported yet")
@@ -162,7 +203,7 @@ def validate_qedge(qedge_id: str, qedge: dict[str, Any], qnodes: dict[str, Any])
     if not isinstance(object_, str) or object_ not in qnodes:
         raise ValueError(f"qedge {qedge_id} object must reference an existing qnode")
 
-    unsupported = {"attribute_constraints", "qualifier_constraints"} & set(qedge)
+    unsupported = {"attribute_constraints"} & set(qedge)
     if unsupported:
         field_list = ", ".join(sorted(unsupported))
         raise ValueError(f"qedge {qedge_id} uses unsupported fields: {field_list}")
@@ -176,6 +217,10 @@ def validate_qedge(qedge_id: str, qedge: dict[str, Any], qnodes: dict[str, Any])
         "subject": subject,
         "object": object_,
         "predicates": ensure_string_list(qedge.get("predicates"), f"qedge {qedge_id}.predicates"),
+        "qualifier_constraints": ensure_qualifier_constraints(
+            qedge.get("qualifier_constraints"),
+            f"qedge {qedge_id}.qualifier_constraints",
+        ),
     }
 
 
@@ -238,6 +283,18 @@ def normalize_trapi_request(request: dict[str, Any], subclass_depth: int = 1) ->
 
 def values_clause(variable: str, iris: list[str]) -> str:
     return f"VALUES {variable} {{ {' '.join(iri_term(iri) for iri in iris)} }}"
+
+
+def safe_name(value: str) -> str:
+    return value.replace(" ", "_")
+
+
+def custom_slot_iri(key: str) -> str:
+    return KGX_SLOT_NS + quote(safe_name(key), safe="._-")
+
+
+def enum_value_iri(enum_name: str, value: str) -> str:
+    return BIOLINK_ENUM_NS + quote(enum_name, safe="._-/") + "/" + quote(value, safe="._-")
 
 
 def assign_indexes(records: dict[str, dict[str, Any]]) -> None:
@@ -325,6 +382,75 @@ def qedge_predicate_filter_var(qedge: dict[str, Any]) -> str:
     return f"?predicate_filter_{qedge['index']}_{safe_var_suffix(qedge['qedge_id'])}"
 
 
+def qedge_qualifier_predicate_var(qedge: dict[str, Any], constraint_index: int, filter_index: int) -> str:
+    return f"?qualifier_predicate_{qedge['index']}_{constraint_index}_{filter_index}"
+
+
+def qedge_qualifier_value_var(qedge: dict[str, Any], constraint_index: int, filter_index: int) -> str:
+    return f"?qualifier_value_{qedge['index']}_{constraint_index}_{filter_index}"
+
+
+def qualifier_type_name(qualifier_type_id: str) -> str:
+    return qualifier_type_id.removeprefix("biolink:")
+
+
+def qualifier_predicate_iris(qualifier_type_id: str) -> list[str]:
+    qualifier_name = qualifier_type_name(qualifier_type_id)
+    candidate_iris = [
+        curie_to_iri(f"biolink:{qualifier_name}"),
+        custom_slot_iri(qualifier_name),
+    ]
+    return dedupe(candidate_iris)
+
+
+def qualifier_value_iris(qualifier_type_id: str, qualifier_value: str) -> list[str]:
+    qualifier_name = qualifier_type_name(qualifier_type_id)
+    if not TOOLKIT.is_qualifier(qualifier_name):
+        raise ValueError(f"Invalid qualifier in query: {qualifier_name}")
+
+    if qualifier_name == "qualified_predicate":
+        return [curie_to_iri(qualifier_value)]
+
+    qualifier_value_plus_descendants = [qualifier_value]
+    permissible_value = False
+    for enum_name in ALL_BIOLINK_ENUMS:
+        if TOOLKIT.is_permissible_value_of_enum(enum_name=enum_name, value=qualifier_value):
+            permissible_value = True
+            qualifier_value_plus_descendants.extend(
+                TOOLKIT.get_permissible_value_descendants(
+                    permissible_value=qualifier_value,
+                    enum_name=enum_name,
+                )
+            )
+    if not permissible_value:
+        raise ValueError(f"Invalid value for qualifier {qualifier_name} in query: {qualifier_value}")
+
+    return dedupe(
+        [enum_value_iri(enum_name, value)
+         for enum_name in ALL_BIOLINK_ENUMS
+         if TOOLKIT.is_permissible_value_of_enum(enum_name=enum_name, value=qualifier_value)
+         for value in set(qualifier_value_plus_descendants)]
+    )
+
+
+def qualifier_type_id_from_predicate(predicate: str) -> str | None:
+    candidates: list[str] = []
+    if predicate.startswith(KGX_SLOT_NS):
+        candidates.append(unquote(predicate[len(KGX_SLOT_NS) :]))
+    if predicate.startswith(BIOLINK_VOCAB):
+        candidates.append(unquote(predicate[len(BIOLINK_VOCAB) :]))
+    for candidate in candidates:
+        if TOOLKIT.is_qualifier(candidate):
+            return f"biolink:{candidate}"
+    return None
+
+
+def decode_qualifier_value(value: str) -> Any:
+    if value.startswith(BIOLINK_ENUM_NS):
+        return unquote(value.rsplit("/", 1)[1])
+    return decode_typed_literal(value)
+
+
 def append_node_filters(lines: list[str], qnode: dict[str, Any]) -> None:
     variable = qnode_binding_var(qnode)
     ids = [curie_to_iri(value) for value in qnode["ids"]]
@@ -345,6 +471,41 @@ def append_edge_filters(lines: list[str], qedge: dict[str, Any]) -> None:
         predicate_var = qedge_predicate_filter_var(qedge)
         lines.append(f"  {values_clause(predicate_var, predicate_iris)}")
         lines.append(f"  {qedge_predicate_var(qedge)} <{RDFS_SUBPROPERTY_OF}>* {predicate_var} .")
+
+    qualifier_constraint_lines = build_qualifier_constraint_lines(qedge)
+    lines.extend(qualifier_constraint_lines)
+
+
+def build_qualifier_constraint_lines(qedge: dict[str, Any]) -> list[str]:
+    constraints = qedge.get("qualifier_constraints", [])
+    branches: list[str] = []
+    for constraint_index, constraint in enumerate(constraints):
+        qualifier_set = constraint.get("qualifier_set", [])
+        if not qualifier_set:
+            continue
+        branch_lines = ["  {"]
+        for filter_index, qualifier_filter in enumerate(qualifier_set):
+            predicate_var = qedge_qualifier_predicate_var(qedge, constraint_index, filter_index)
+            value_var = qedge_qualifier_value_var(qedge, constraint_index, filter_index)
+            branch_lines.append(
+                f"    {values_clause(predicate_var, qualifier_predicate_iris(qualifier_filter['qualifier_type_id']))}"
+            )
+            branch_lines.append(
+                f"    {values_clause(value_var, qualifier_value_iris(qualifier_filter['qualifier_type_id'], qualifier_filter['qualifier_value']))}"
+            )
+            branch_lines.append(f"    {qedge_binding_var(qedge)} {predicate_var} {value_var} .")
+        branch_lines.append("  }")
+        branches.append("\n".join(branch_lines))
+
+    if not branches:
+        return []
+
+    lines: list[str] = []
+    for index, branch in enumerate(branches):
+        if index:
+            lines.append("  UNION")
+        lines.extend(branch.splitlines())
+    return lines
 
 
 def build_trapi_query(normalized_request: dict[str, Any], limit: int | None = None) -> str:
@@ -546,6 +707,31 @@ def build_sources(properties: list[dict[str, str]]) -> list[dict[str, str]]:
     return sources
 
 
+def build_qualifiers(properties: list[dict[str, str]]) -> list[dict[str, Any]]:
+    qualifiers: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for prop in properties:
+        qualifier_type_id = qualifier_type_id_from_predicate(prop["predicate"])
+        if qualifier_type_id is None:
+            continue
+        qualifier_value = decode_qualifier_value(prop["value"])
+        key = (qualifier_type_id, json.dumps(qualifier_value, sort_keys=True, default=str))
+        if key in seen:
+            continue
+        seen.add(key)
+        qualifiers.append(
+            {
+                "qualifier_type_id": qualifier_type_id,
+                "qualifier_value": qualifier_value,
+            }
+        )
+    return qualifiers
+
+
+def qualifier_predicates_in_properties(properties: list[dict[str, str]]) -> set[str]:
+    return {prop["predicate"] for prop in properties if qualifier_type_id_from_predicate(prop["predicate"]) is not None}
+
+
 def resource_values_by_predicate(properties: list[dict[str, str]]) -> dict[str, list[str]]:
     values: dict[str, list[str]] = {}
     for prop in properties:
@@ -571,9 +757,12 @@ def edge_payload_from_properties(edge_iri: str, properties: dict[str, list[dict[
     sources = build_sources(edge_props)
     if sources:
         edge_payload["sources"] = sources
+    qualifiers = build_qualifiers(edge_props)
+    if qualifiers:
+        edge_payload["qualifiers"] = qualifiers
     edge_attributes = build_trapi_attributes(
         edge_props,
-        exclude_predicates=STRUCTURAL_EDGE_PREDICATES | set(SOURCE_ROLE_BY_PREDICATE),
+        exclude_predicates=STRUCTURAL_EDGE_PREDICATES | set(SOURCE_ROLE_BY_PREDICATE) | qualifier_predicates_in_properties(edge_props),
     )
     if edge_attributes:
         edge_payload["attributes"] = edge_attributes

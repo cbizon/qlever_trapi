@@ -113,6 +113,42 @@ def branch_request() -> dict:
     }
 
 
+def qualifier_request(qualifier_value: str = "activity") -> dict:
+    return {
+        "message": {
+            "query_graph": {
+                "nodes": {
+                    "n0": {},
+                    "n1": {
+                        "ids": ["NCBIGene:283871"],
+                    },
+                },
+                "edges": {
+                    "e0": {
+                        "subject": "n0",
+                        "object": "n1",
+                        "predicates": ["biolink:affects"],
+                        "qualifier_constraints": [
+                            {
+                                "qualifier_set": [
+                                    {
+                                        "qualifier_type_id": "biolink:qualified_predicate",
+                                        "qualifier_value": "biolink:causes",
+                                    },
+                                    {
+                                        "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                        "qualifier_value": qualifier_value,
+                                    },
+                                ]
+                            }
+                        ],
+                    }
+                },
+            }
+        }
+    }
+
+
 def test_normalize_trapi_request_rejects_unreferenced_qnode() -> None:
     request = sample_request()
     request["message"]["query_graph"]["nodes"]["n2"] = {"categories": ["biolink:Gene"]}
@@ -147,6 +183,17 @@ def test_build_trapi_query_adds_internal_subclass_patterns_for_pinned_nodes() ->
     assert "UNION" in query
 
 
+def test_build_trapi_query_adds_qualifier_filters() -> None:
+    query = build_trapi_query(normalize_trapi_request(qualifier_request(), subclass_depth=0), limit=25)
+
+    assert "qualifier_predicate_0_0_0" in query
+    assert "qualifier_predicate_0_0_1" in query
+    assert "qualified_predicate" in query
+    assert "object_aspect_qualifier" in query
+    assert "biolink/vocab/causes" in query
+    assert "activity" in query
+
+
 def test_iri_to_curie_round_trips_biolink_and_identifiers_org() -> None:
     assert iri_to_curie("https://identifiers.org/MONDO:0004979") == "MONDO:0004979"
     assert iri_to_curie(BIOLINK_VOCAB + "Gene") == "biolink:Gene"
@@ -164,6 +211,8 @@ def qlever_test_server() -> tuple[str, int]:
 
             if "VALUES ?resource" in query:
                 body = properties_tsv()
+            elif "NCBIGene:283871" in query:
+                body = qualified_result_tsv()
             elif "?edge_1_n0_subclass_edge" in query and "MONDO:0000001" in query:
                 body = subclass_result_tsv()
             elif "HP:0001627" in query and "MONDO:0004979" in query and "NCBIGene:1017" in query:
@@ -269,7 +318,7 @@ def properties_tsv() -> str:
         "https://w3id.org/kgx/slot/publications\t"
         "\"PMID:123\"\n"
         "urn:uuid:test-edge\t"
-        "https://w3id.org/kgx/slot/qualified_predicate\t"
+        "https://w3id.org/biolink/vocab/qualified_predicate\t"
         "https://w3id.org/biolink/vocab/causes\n"
         "urn:uuid:edge-affects\t"
         "http://www.w3.org/1999/02/22-rdf-syntax-ns#subject\t"
@@ -358,6 +407,37 @@ def properties_tsv() -> str:
         "urn:uuid:t2d-isa-disease\t"
         "https://w3id.org/biolink/vocab/primary_knowledge_source\t"
         "infores:test-kp\n"
+        "https://identifiers.org/NCBIGene:283871\t"
+        f"{RDFS_LABEL}\t\"GENE283871\"\n"
+        "https://identifiers.org/NCBIGene:283871\t"
+        "http://www.w3.org/1999/02/22-rdf-syntax-ns#type\t"
+        "https://w3id.org/biolink/vocab/Gene\n"
+        "https://identifiers.org/PUBCHEM.COMPOUND:5460341\t"
+        f"{RDFS_LABEL}\t\"Compound5460341\"\n"
+        "https://identifiers.org/PUBCHEM.COMPOUND:5460341\t"
+        "http://www.w3.org/1999/02/22-rdf-syntax-ns#type\t"
+        "https://w3id.org/biolink/vocab/ChemicalEntity\n"
+        "urn:uuid:qualified-edge\t"
+        "http://www.w3.org/1999/02/22-rdf-syntax-ns#subject\t"
+        "https://identifiers.org/PUBCHEM.COMPOUND:5460341\n"
+        "urn:uuid:qualified-edge\t"
+        "http://www.w3.org/1999/02/22-rdf-syntax-ns#predicate\t"
+        "https://w3id.org/biolink/vocab/affects\n"
+        "urn:uuid:qualified-edge\t"
+        "http://www.w3.org/1999/02/22-rdf-syntax-ns#object\t"
+        "https://identifiers.org/NCBIGene:283871\n"
+        "urn:uuid:qualified-edge\t"
+        "https://w3id.org/biolink/vocab/primary_knowledge_source\t"
+        "infores:test-kp\n"
+        "urn:uuid:qualified-edge\t"
+        "https://w3id.org/biolink/vocab/qualified_predicate\t"
+        "https://w3id.org/biolink/vocab/causes\n"
+        "urn:uuid:qualified-edge\t"
+        "https://w3id.org/biolink/vocab/object_aspect_qualifier\t"
+        "https://w3id.org/biolink/enum/GeneOrGeneProductOrChemicalEntityAspectEnum/activity\n"
+        "urn:uuid:qualified-edge\t"
+        "https://w3id.org/biolink/vocab/object_direction_qualifier\t"
+        "https://w3id.org/biolink/enum/DirectionQualifierEnum/decreased\n"
     )
 
 
@@ -370,6 +450,16 @@ def subclass_result_tsv() -> str:
         "urn:uuid:t2d-has-phenotype\t"
         "urn:uuid:t2d-isa-disease\t"
         "https://w3id.org/biolink/vocab/has_phenotype\n"
+    )
+
+
+def qualified_result_tsv() -> str:
+    return (
+        "?node_0_n0\t?node_1_n1\t?edge_0_e0\t?predicate_0_e0\n"
+        "https://identifiers.org/PUBCHEM.COMPOUND:5460341\t"
+        "https://identifiers.org/NCBIGene:283871\t"
+        "urn:uuid:qualified-edge\t"
+        "https://w3id.org/biolink/vocab/affects\n"
     )
 
 
@@ -412,14 +502,16 @@ def test_answer_trapi_request_returns_message_with_knowledge_graph_and_results(
                                 "resource_role": "primary_knowledge_source",
                             }
                         ],
+                        "qualifiers": [
+                            {
+                                "qualifier_type_id": "biolink:qualified_predicate",
+                                "qualifier_value": "biolink:causes",
+                            }
+                        ],
                         "attributes": [
                             {
                                 "attribute_type_id": "https://w3id.org/kgx/slot/publications",
                                 "value": "PMID:123",
-                            },
-                            {
-                                "attribute_type_id": "https://w3id.org/kgx/slot/qualified_predicate",
-                                "value": "biolink:causes",
                             },
                         ],
                     }
@@ -563,6 +655,70 @@ def test_answer_trapi_request_supports_endpoint_subclass_reasoning(
         {
             "resource_id": "infores:qlever-trapi-test",
             "resource_role": "primary_knowledge_source",
+        }
+    ]
+
+
+def test_answer_trapi_request_formats_edge_qualifiers(
+    qlever_test_server: tuple[str, int],
+) -> None:
+    host, port = qlever_test_server
+
+    response = answer_trapi_request(
+        qualifier_request(),
+        host_name=host,
+        port=port,
+        limit=10,
+        resource_id="infores:qlever-trapi-test",
+        subclass_depth=0,
+    )
+
+    edge = response["message"]["knowledge_graph"]["edges"]["urn:uuid:qualified-edge"]
+    assert edge["qualifiers"] == [
+        {
+            "qualifier_type_id": "biolink:qualified_predicate",
+            "qualifier_value": "biolink:causes",
+        },
+        {
+            "qualifier_type_id": "biolink:object_aspect_qualifier",
+            "qualifier_value": "activity",
+        },
+        {
+            "qualifier_type_id": "biolink:object_direction_qualifier",
+            "qualifier_value": "decreased",
+        },
+    ]
+    assert "attributes" not in edge
+
+
+def test_answer_trapi_request_matches_qualifier_hierarchy(
+    qlever_test_server: tuple[str, int],
+) -> None:
+    host, port = qlever_test_server
+
+    response = answer_trapi_request(
+        qualifier_request("activity_or_abundance"),
+        host_name=host,
+        port=port,
+        limit=10,
+        resource_id="infores:qlever-trapi-test",
+        subclass_depth=0,
+    )
+
+    assert response["message"]["results"] == [
+        {
+            "node_bindings": {
+                "n0": [{"id": "PUBCHEM.COMPOUND:5460341"}],
+                "n1": [{"id": "NCBIGene:283871"}],
+            },
+            "analyses": [
+                {
+                    "resource_id": "infores:qlever-trapi-test",
+                    "edge_bindings": {
+                        "e0": [{"id": "urn:uuid:qualified-edge"}],
+                    },
+                }
+            ],
         }
     ]
 
