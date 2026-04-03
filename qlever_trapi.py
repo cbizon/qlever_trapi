@@ -1496,6 +1496,99 @@ def build_knowledge_graph(
     )
 
 
+def build_meta_knowledge_graph_edge_query() -> str:
+    return "\n".join(
+        [
+            "PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>",
+            "SELECT DISTINCT ?subject_category ?predicate ?object_category",
+            "WHERE {",
+            "  ?edge a rdf:Statement ;",
+            "    rdf:subject ?subject ;",
+            "    rdf:predicate ?predicate ;",
+            "    rdf:object ?object .",
+            "  ?subject rdf:type ?subject_category .",
+            "  ?object rdf:type ?object_category .",
+            f"  FILTER(?subject_category != <{RDF_STATEMENT}>)",
+            f"  FILTER(?object_category != <{RDF_STATEMENT}>)",
+            "}",
+            "ORDER BY ?subject_category ?predicate ?object_category",
+            "",
+        ]
+    )
+
+
+def build_meta_knowledge_graph_node_query() -> str:
+    return "\n".join(
+        [
+            "PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>",
+            "SELECT DISTINCT ?category ?node",
+            "WHERE {",
+            "  ?node rdf:type ?category .",
+            f"  FILTER(?category != <{RDF_STATEMENT}>)",
+            "}",
+            "ORDER BY ?category ?node",
+            "",
+        ]
+    )
+
+
+def curie_prefix(value: str) -> str | None:
+    curie = iri_to_curie(value)
+    if "://" in curie or curie.startswith("urn:") or ":" not in curie:
+        return None
+    return curie.split(":", 1)[0]
+
+
+def meta_edge_key(subject: str, predicate: str, object_: str) -> str:
+    digest = hashlib.sha256(f"{subject}|{predicate}|{object_}".encode("utf-8")).hexdigest()
+    return digest[:16]
+
+
+def answer_meta_knowledge_graph_request(
+    host_name: str = "localhost",
+    port: int = 8888,
+    access_token: str | None = None,
+) -> dict[str, Any]:
+    edge_result = run_qlever_query(
+        host_name,
+        port,
+        build_meta_knowledge_graph_edge_query(),
+        access_token=access_token,
+    )
+    node_result = run_qlever_query(
+        host_name,
+        port,
+        build_meta_knowledge_graph_node_query(),
+        access_token=access_token,
+    )
+
+    nodes: dict[str, dict[str, Any]] = {}
+    for row in rows_from_result(node_result):
+        category = iri_to_curie(row["?category"])
+        node_payload = nodes.setdefault(category, {"id_prefixes": []})
+        prefix = curie_prefix(row["?node"])
+        if prefix and prefix not in node_payload["id_prefixes"]:
+            node_payload["id_prefixes"].append(prefix)
+    for node_payload in nodes.values():
+        node_payload["id_prefixes"].sort()
+
+    edges: dict[str, dict[str, str]] = {}
+    for row in rows_from_result(edge_result):
+        subject = iri_to_curie(row["?subject_category"])
+        predicate = iri_to_curie(row["?predicate"])
+        object_ = iri_to_curie(row["?object_category"])
+        edges[meta_edge_key(subject, predicate, object_)] = {
+            "subject": subject,
+            "predicate": predicate,
+            "object": object_,
+        }
+
+    return {
+        "nodes": dict(sorted(nodes.items())),
+        "edges": dict(sorted(edges.items())),
+    }
+
+
 def qnodes_with_superclass_nodes(normalized_request: dict[str, Any]) -> set[str]:
     return {
         qnode_id

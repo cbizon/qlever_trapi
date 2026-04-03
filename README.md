@@ -8,6 +8,12 @@ This repository now also includes a TRAPI wrapper for query-graph matching again
 
 Use `uv run`. Do not install into the system Python or Anaconda base environment.
 
+Create or refresh the local environment:
+
+```bash
+uv sync
+```
+
 ## Layout
 
 Generated files live under `artifacts/`:
@@ -97,6 +103,7 @@ Current support:
 - TRAPI knowledge graph metadata projection for nodes and edges, including names, categories, attributes, qualifiers, and sources
 - provenance/source reconstruction from nested `sources` resources plus downstream service attribution
 - HTTP service endpoints `GET /health` and `POST /query`
+- FastAPI service endpoints `GET /health`, `POST /query`, `POST /asyncquery`, `GET /asyncquery_status/{job_id}`, `GET /meta_knowledge_graph`, and `GET /metakg`
 
 Current gap:
 - `set_interpretation=MANY` is still not implemented
@@ -126,6 +133,17 @@ uv run python qlever_trapi.py --serve --listen-host 127.0.0.1 --listen-port 8000
 ```
 
 The HTTP service returns a JSON envelope with `status`, `description`, `http_code`, and, on success, `message`.
+
+To run the FastAPI service:
+
+```bash
+uv run python qlever_trapi_fastapi.py --listen-host 127.0.0.1 --listen-port 8000 --host-name localhost --port 8888 --subclass-depth 1
+```
+
+The FastAPI app adds:
+- `POST /asyncquery` to submit a query for background execution
+- `GET /asyncquery_status/{job_id}` to poll job state and retrieve the completed TRAPI payload
+- `GET /meta_knowledge_graph` and `GET /metakg` to expose a live meta knowledge graph derived from the indexed KG
 
 ### Subclass behavior
 

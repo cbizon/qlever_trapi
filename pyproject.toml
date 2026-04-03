@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qlever-trapi"
+version = "0.1.0"
+description = "TRAPI wrapper and FastAPI service for a QLever-backed Translator KG"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "bmt>=1.4.4",
+    "fastapi>=0.115.0",
+    "uvicorn>=0.30.0",
+    "zstandard>=0.23.0",
+]
+
+[project.scripts]
+benchmark-find-paths = "benchmark_find_paths:main"
+find-paths = "find_paths:main"
+kgx-to-qlever-rdf = "kgx_to_qlever_rdf:main"
+make-qlever-config = "make_qlever_config:main"
+qlever-trapi = "qlever_trapi:main"
+qlever-trapi-fastapi = "qlever_trapi_fastapi:main"
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.0",
+    "pytest>=8.3.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.setuptools]
+py-modules = [
+    "benchmark_find_paths",
+    "find_paths",
+    "kgx_to_qlever_rdf",
+    "make_qlever_config",
+    "qlever_trapi",
+    "qlever_trapi_fastapi",
+]

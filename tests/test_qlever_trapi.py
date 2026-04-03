@@ -1,10 +1,13 @@
 import json
 import threading
+import time
+from typing import Any
 import urllib.error
 import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from fastapi.testclient import TestClient
 import pytest
 
 from qlever_trapi import (
@@ -17,6 +20,7 @@ from qlever_trapi import (
     iri_to_curie,
     normalize_trapi_request,
 )
+from qlever_trapi_fastapi import create_fastapi_app
 
 
 def sample_request() -> dict:
@@ -505,7 +509,11 @@ def qlever_test_server() -> tuple[str, int]:
             params = urllib.parse.parse_qs(payload)
             query = params["query"][0]
 
-            if "VALUES ?resource" in query:
+            if "?subject_category ?predicate ?object_category" in query:
+                body = meta_knowledge_graph_edge_tsv()
+            elif "?category ?node" in query:
+                body = meta_knowledge_graph_node_tsv()
+            elif "VALUES ?resource" in query:
                 body = properties_tsv()
             elif "?edge_1_n0_subclass_edge" in query and "HP:0000118" in query:
                 body = inverse_subclass_result_tsv()
@@ -662,6 +670,41 @@ def empty_edge_result_tsv() -> str:
     return "\n".join(
         [
             "?node_0_n0\t?node_1_n1\t?edge_0_e0\t?predicate_0_e0\t?orientation_0_e0",
+            "",
+        ]
+    )
+
+
+def meta_knowledge_graph_edge_tsv() -> str:
+    return "\n".join(
+        [
+            "?subject_category\t?predicate\t?object_category",
+            "https://w3id.org/biolink/vocab/ChemicalEntity\thttps://w3id.org/biolink/vocab/treats\thttps://w3id.org/biolink/vocab/Disease",
+            "https://w3id.org/biolink/vocab/ChemicalEntity\thttps://w3id.org/biolink/vocab/affects\thttps://w3id.org/biolink/vocab/Gene",
+            "https://w3id.org/biolink/vocab/Gene\thttps://w3id.org/biolink/vocab/related_to\thttps://w3id.org/biolink/vocab/Gene",
+            "https://w3id.org/biolink/vocab/Gene\thttps://w3id.org/biolink/vocab/related_to\thttps://w3id.org/biolink/vocab/Disease",
+            "https://w3id.org/biolink/vocab/Gene\thttps://w3id.org/biolink/vocab/causes\thttps://w3id.org/biolink/vocab/PhenotypicFeature",
+            "https://w3id.org/biolink/vocab/Gene\thttps://w3id.org/biolink/vocab/gene_associated_with_condition\thttps://w3id.org/biolink/vocab/Disease",
+            "https://w3id.org/biolink/vocab/Disease\thttps://w3id.org/biolink/vocab/subclass_of\thttps://w3id.org/biolink/vocab/Disease",
+            "https://w3id.org/biolink/vocab/Disease\thttps://w3id.org/biolink/vocab/has_phenotype\thttps://w3id.org/biolink/vocab/PhenotypicFeature",
+            "https://w3id.org/biolink/vocab/Disease\thttps://w3id.org/biolink/vocab/genetically_associated_with\thttps://w3id.org/biolink/vocab/Gene",
+            "https://w3id.org/biolink/vocab/Disease\thttps://w3id.org/biolink/vocab/related_to\thttps://w3id.org/biolink/vocab/Gene",
+            "https://w3id.org/biolink/vocab/ChemicalEntity\thttps://w3id.org/biolink/vocab/causes\thttps://w3id.org/biolink/vocab/Disease",
+            "",
+        ]
+    )
+
+
+def meta_knowledge_graph_node_tsv() -> str:
+    return "\n".join(
+        [
+            "?category\t?node",
+            "https://w3id.org/biolink/vocab/ChemicalEntity\thttps://identifiers.org/CHEBI:45783",
+            "https://w3id.org/biolink/vocab/ChemicalEntity\thttps://identifiers.org/PUBCHEM.COMPOUND:5460341",
+            "https://w3id.org/biolink/vocab/ChemicalEntity\thttps://identifiers.org/MESH:D014612",
+            "https://w3id.org/biolink/vocab/Disease\thttps://identifiers.org/MONDO:0004979",
+            "https://w3id.org/biolink/vocab/Gene\thttps://identifiers.org/NCBIGene:1017",
+            "https://w3id.org/biolink/vocab/PhenotypicFeature\thttps://identifiers.org/HP:0000118",
             "",
         ]
     )
@@ -1655,6 +1698,51 @@ def trapi_service_server(qlever_test_server: tuple[str, int]) -> tuple[str, int]
         server.server_close()
 
 
+@pytest.fixture()
+def fastapi_client(qlever_test_server: tuple[str, int]) -> TestClient:
+    qlever_host, qlever_port = qlever_test_server
+    app = create_fastapi_app(
+        qlever_host_name=qlever_host,
+        qlever_port=qlever_port,
+        access_token=None,
+        limit=50,
+        resource_id="infores:qlever-trapi-fastapi-test",
+        subclass_depth=0,
+        async_workers=2,
+        async_job_ttl_seconds=60,
+        metakg_cache_seconds=0,
+    )
+    with TestClient(app) as client:
+        yield client
+
+
+@pytest.fixture()
+def callback_capture_server() -> tuple[str, int, list[dict[str, Any]]]:
+    captured: list[dict[str, Any]] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802
+            length = int(self.headers["Content-Length"])
+            payload = self.rfile.read(length).decode("utf-8")
+            captured.append(json.loads(payload))
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, format: str, *args) -> None:  # noqa: A003
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server.server_address[0], server.server_address[1], captured
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
+
+
 def http_json_request(
     method: str,
     url: str,
@@ -1733,3 +1821,128 @@ def test_http_service_returns_404_for_unknown_path(trapi_service_server: tuple[s
         "http_code": 404,
         "status": "NotFound",
     }
+
+
+def test_fastapi_health_endpoint(fastapi_client: TestClient) -> None:
+    response = fastapi_client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "description": "TRAPI service is healthy",
+        "http_code": 200,
+        "status": "Success",
+    }
+
+
+def test_fastapi_query_endpoint_returns_trapi_envelope(fastapi_client: TestClient) -> None:
+    response = fastapi_client.post("/query", json=chain_request())
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "Success"
+    assert payload["description"] == "Query processed successfully"
+    assert payload["http_code"] == 200
+    assert payload["message"]["knowledge_graph"]["edges"]["urn:uuid:edge-related"]["predicate"] == "biolink:related_to"
+    assert payload["message"]["results"][0]["analyses"][0]["resource_id"] == "infores:qlever-trapi-fastapi-test"
+
+
+def test_fastapi_asyncquery_endpoint_completes_and_posts_callback(
+    fastapi_client: TestClient,
+    callback_capture_server: tuple[str, int, list[dict[str, Any]]],
+) -> None:
+    host, port, captured = callback_capture_server
+    request = sample_request()
+    request["callback"] = f"http://{host}:{port}/callback"
+
+    response = fastapi_client.post("/asyncquery", json=request)
+
+    assert response.status_code == 202
+    submit_payload = response.json()
+    assert submit_payload["status"] in {"Accepted", "Running"}
+    job_id = submit_payload["job_id"]
+
+    for _ in range(50):
+        status_response = fastapi_client.get(f"/asyncquery_status/{job_id}")
+        status_payload = status_response.json()
+        if status_payload["status"] == "Success":
+            break
+        time.sleep(0.05)
+    else:
+        raise AssertionError(f"Async query job {job_id} did not complete in time")
+
+    assert status_response.status_code == 200
+    assert status_payload["message"]["results"] == [
+        {
+            "node_bindings": {
+                "n0": [{"id": "CHEBI:45783"}],
+                "n1": [{"id": "MONDO:0004979"}],
+            },
+            "analyses": [
+                {
+                    "resource_id": "infores:qlever-trapi-fastapi-test",
+                    "edge_bindings": {
+                        "e0": [{"id": "urn:uuid:test-edge"}],
+                    },
+                }
+            ],
+        }
+    ]
+    assert captured, "Expected asyncquery callback to be delivered"
+    assert captured[0]["status"] == "Success"
+    assert captured[0]["message"]["results"] == status_payload["message"]["results"]
+
+
+def test_fastapi_asyncquery_status_returns_404_for_unknown_job(
+    fastapi_client: TestClient,
+) -> None:
+    response = fastapi_client.get("/asyncquery_status/not-a-job")
+
+    assert response.status_code == 404
+    assert response.json() == {
+        "description": "Unknown async query job: not-a-job",
+        "http_code": 404,
+        "status": "NotFound",
+    }
+
+
+def test_fastapi_meta_knowledge_graph_endpoint(fastapi_client: TestClient) -> None:
+    response = fastapi_client.get("/meta_knowledge_graph")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "Success"
+    assert payload["description"] == "Meta knowledge graph generated successfully"
+    metakg = payload["meta_knowledge_graph"]
+    assert metakg["nodes"]["biolink:ChemicalEntity"]["id_prefixes"] == [
+        "CHEBI",
+        "MESH",
+        "PUBCHEM.COMPOUND",
+    ]
+    assert metakg["nodes"]["biolink:Disease"]["id_prefixes"] == ["MONDO"]
+    assert metakg["nodes"]["biolink:Gene"]["id_prefixes"] == ["NCBIGene"]
+    assert metakg["nodes"]["biolink:PhenotypicFeature"]["id_prefixes"] == ["HP"]
+    assert any(
+        edge == {
+            "subject": "biolink:ChemicalEntity",
+            "predicate": "biolink:treats",
+            "object": "biolink:Disease",
+        }
+        for edge in metakg["edges"].values()
+    )
+    assert any(
+        edge == {
+            "subject": "biolink:Disease",
+            "predicate": "biolink:has_phenotype",
+            "object": "biolink:PhenotypicFeature",
+        }
+        for edge in metakg["edges"].values()
+    )
+
+
+def test_fastapi_metakg_alias_matches_meta_knowledge_graph(fastapi_client: TestClient) -> None:
+    meta_knowledge_graph_response = fastapi_client.get("/meta_knowledge_graph")
+    metakg_response = fastapi_client.get("/metakg")
+
+    assert meta_knowledge_graph_response.status_code == 200
+    assert metakg_response.status_code == 200
+    assert metakg_response.json() == meta_knowledge_graph_response.json()
