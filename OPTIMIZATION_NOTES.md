@@ -408,3 +408,92 @@ Based on the experiments so far, there is little reason to keep investing in:
 - every-node online subclass expansion in SPARQL
 
 Those paths were all benchmarked, and they all lost.
+
+## TRAPI Wrapper Query-Planning Tuning
+
+### Accepted optimization pass
+
+We also tuned the `qlever_trapi.py` TRAPI wrapper directly using the standalone
+performance suite in:
+- `/Users/bizon/Projects/Dogsled/trapi_performance_teseter`
+
+The accepted changes were:
+- cache Biolink descendant predicate expansions in memory
+- fetch the actual predicate vocabulary from the live QLever index once and
+  prune each query's `VALUES ?predicate` list to predicates that really exist
+  in this graph
+- remove the generated top-level `ORDER BY` from TRAPI SPARQL, since TRAPI does
+  not require a stable row order and result deduplication already happens
+  client-side
+
+These changes improved the packaged performance run from:
+- `8.677s` total:
+  - `/Users/bizon/Projects/Dogsled/trapi_performance_teseter/results/qlever_fresh2.json`
+
+to:
+- `5.272s` total:
+  - `/Users/bizon/Projects/Dogsled/trapi_performance_teseter/results/qlever_after_pass1.json`
+
+That is about a `39%` reduction in total wall time for the packaged suite.
+
+The biggest wins were broad zero-result planners where the old query emitted a
+large predicate list that mostly did not exist in the indexed graph:
+- `robokop_two_hop_BiologicalEntity_assoc`
+  - `2.087s -> 0.122s`
+- `robokop_two_hop_ChemicalEntity_affects`
+  - `1.493s -> 0.116s`
+
+The 3-hop Imatinib-to-asthma query improved, but remained the slowest packaged
+case:
+- `imatinib_to_asthma_3_hop_related_to_at_instance_level`
+  - `1.481s -> 1.449s` in the packaged suite
+
+A repeat warm run stayed in the same range:
+- `5.365s` total:
+  - `/Users/bizon/Projects/Dogsled/trapi_performance_teseter/results/qlever_after_pass1_warm.json`
+
+Conclusion:
+- graph-aware predicate pruning is worth keeping
+- removing the generated `ORDER BY` is worth keeping
+- the remaining bottleneck is no longer TRAPI response assembly
+- the remaining bottleneck is mostly QLever query planning on the broadest
+  multi-hop zero-result cases
+
+### Rejected TRAPI-wrapper passes
+
+Several follow-up passes were tested and rejected because the measured suite
+results got worse:
+- replace category hierarchy checks with exact `rdf:type` plus expanded
+  category `VALUES`
+- move qnode ID/category filters earlier in the emitted SPARQL
+- remove SPARQL-side `DISTINCT`
+- prune synthetic subclass support for pinned IDs by probing whether subclass
+  children exist
+- perform extra category-pair predicate lookups to shrink the per-edge
+  predicate domain further
+
+The subclass-child pruning pass was especially bad. It blew the packaged suite
+up from:
+- `5.272s` total:
+  - `/Users/bizon/Projects/Dogsled/trapi_performance_teseter/results/qlever_after_pass1.json`
+
+to:
+- `533.257s` total:
+  - `/Users/bizon/Projects/Dogsled/trapi_performance_teseter/results/qlever_after_pass2.json`
+
+That pass was reverted.
+
+### Current practical ceiling
+
+For the current code path, additional SPARQL text reshaping is giving sharply
+diminishing returns. The useful improvement was to stop asking QLever to plan
+against predicates that are not in the graph. Past that point, the remaining
+slow cases appear to be dominated by the inherent planning cost of broad
+multi-hop query shapes on this index.
+
+So the current practical recommendation is:
+- keep the accepted graph-aware predicate pruning
+- stop doing speculative TRAPI-wrapper query rewrites unless we have a very
+  narrow hypothesis and a benchmark to prove it
+- look for the next speedup in data/index layout or traversal representation,
+  not in more SPARQL string surgery
