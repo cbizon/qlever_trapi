@@ -57,11 +57,11 @@ qlever index \
 qlever start \
   --system native \
   --name artifacts/qlever/translator_kg/translator_kg \
-  --memory-for-queries 16G \
-  --timeout 120s
+  --memory-for-queries 20G \
+  --timeout 300s
 ```
 
-Use a larger timeout for large path exports; the default `30s` is too small.
+The broad TRAPI benchmark queries in this repo need more than the minimal QLever defaults. `20G` query memory and a `300s` timeout keep the wide 2-hop and 3-hop predicate-hierarchy queries from failing due to tight runtime limits.
 
 ## Query Paths
 

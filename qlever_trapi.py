@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 import argparse
+from functools import lru_cache
 import hashlib
 import json
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import re
 import sys
+import time
 from typing import Any
 import urllib.error
 from urllib.parse import quote, unquote
@@ -21,6 +23,7 @@ from find_paths import (
     iri_term,
     rows_from_result,
     run_qlever_query,
+    run_qlever_query_with_runtime,
     strip_typed_literal,
 )
 
@@ -57,6 +60,11 @@ SOURCE_ROLE_BY_PREDICATE = {
     BIOLINK_VOCAB + "aggregator_knowledge_source": "aggregator_knowledge_source",
     BIOLINK_VOCAB + "supporting_data_source": "supporting_data_source",
 }
+SOURCE_ROLE_ORDER = {
+    "primary_knowledge_source": 0,
+    "aggregator_knowledge_source": 1,
+    "supporting_data_source": 2,
+}
 STRUCTURAL_EDGE_PREDICATES = {
     RDF_TYPE,
     RDF_SUBJECT,
@@ -76,6 +84,18 @@ ATTRIBUTE_TYPE_OVERRIDES = {
     }
 }
 LINKED_RESOURCE_SLOTS = ("sources", "attributes")
+QLEVER_DURATION_RE = re.compile(r"^(?P<value>\d+(?:\.\d+)?)(?P<unit>ns|us|ms|s)$")
+GRAPH_PREDICATE_QUERY = "\n".join(
+    [
+        f"PREFIX rdf: <{RDF_NS}>",
+        "SELECT DISTINCT ?predicate",
+        "WHERE {",
+        "  ?edge a rdf:Statement ;",
+        "    rdf:predicate ?predicate .",
+        "}",
+        "",
+    ]
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -482,22 +502,42 @@ def constraint_value_term(constraint_id: str, value: Any) -> str:
     return sparql_literal(value)
 
 
-def descendant_predicates(predicate: str) -> list[str]:
+@lru_cache(maxsize=None)
+def descendant_predicates(predicate: str) -> tuple[str, ...]:
     element = TOOLKIT.get_element(space_case(predicate))
     if element is None:
         raise ValueError(f"Invalid predicate in query: {predicate}")
     descendants = TOOLKIT.get_descendants(space_case(predicate))
-    return [
+    return tuple(
         f"biolink:{snake_case(descendant)}"
         for descendant in descendants
         if (
             TOOLKIT.get_element(descendant).annotations.get("canonical_predicate", False)
             or ("symmetric" in TOOLKIT.get_element(descendant) and TOOLKIT.get_element(descendant).symmetric)
         )
-    ]
+    )
 
 
-def predicate_match_modes(predicates: list[str]) -> list[dict[str, Any]]:
+@lru_cache(maxsize=None)
+def graph_predicates(host_name: str, port: int, access_token: str | None) -> frozenset[str]:
+    rows = rows_from_result(
+        run_qlever_query(
+            host_name,
+            port,
+            GRAPH_PREDICATE_QUERY,
+            access_token=access_token,
+        )
+    )
+    return frozenset(
+        iri_to_curie(row["?predicate"][1:-1] if row["?predicate"].startswith("<") and row["?predicate"].endswith(">") else row["?predicate"])
+        for row in rows
+    )
+
+
+def predicate_match_modes(
+    predicates: list[str],
+    available_graph_predicates: frozenset[str] | None = None,
+) -> list[dict[str, Any]]:
     if "biolink:related_to" in predicates:
         predicates = []
     queried_predicates = list(predicates)
@@ -531,6 +571,9 @@ def predicate_match_modes(predicates: list[str]) -> list[dict[str, Any]]:
         for requested_predicate in inverse_predicates
         for predicate in descendant_predicates(requested_predicate)
     )
+    if available_graph_predicates is not None:
+        forward_predicates = [predicate for predicate in forward_predicates if predicate in available_graph_predicates]
+        reverse_predicates = [predicate for predicate in reverse_predicates if predicate in available_graph_predicates]
 
     if queried_predicates and not forward_predicates and not reverse_predicates:
         raise ValueError(
@@ -586,13 +629,16 @@ def rewrite_query_graph_for_subclass(
         if not qnode.get("ids") or qnode_id in qnode_ids_with_hierarchy_edges:
             continue
         superclass_qnode_id = f"{qnode_id}_superclass"
-        synthetic_qnodes[superclass_qnode_id] = {
+        synthetic_qnode = {
             "qnode_id": superclass_qnode_id,
             "ids": list(qnode["ids"]),
             "categories": list(qnode["categories"]),
             "_superclass": True,
             "_original_qnode_id": qnode_id,
         }
+        if len(qnode["ids"]) == 1:
+            synthetic_qnode["_constant_id"] = qnode["ids"][0]
+        synthetic_qnodes[superclass_qnode_id] = synthetic_qnode
         qnode["ids"] = []
         qnode["categories"] = []
         subclass_qedge_id = f"{qnode_id}_subclass_edge"
@@ -628,16 +674,38 @@ def qnode_category_var(qnode: dict[str, Any]) -> str:
     return f"?node_category_{qnode['index']}_{safe_var_suffix(qnode['qnode_id'])}"
 
 
+def qnode_constant_id(qnode: dict[str, Any]) -> str | None:
+    constant_id = qnode.get("_constant_id")
+    return constant_id if isinstance(constant_id, str) else None
+
+
+def qnode_constant_term(qnode: dict[str, Any]) -> str:
+    constant_id = qnode_constant_id(qnode)
+    if constant_id is None:
+        raise ValueError(f"QNode {qnode['qnode_id']} does not have a constant binding")
+    return iri_term(curie_to_iri(constant_id))
+
+
+def qnode_result_id(qnode: dict[str, Any], row: dict[str, str]) -> str:
+    constant_id = qnode_constant_id(qnode)
+    if constant_id is not None:
+        return constant_id
+    return iri_to_curie(row[qnode_binding_var(qnode)])
+
+
+def qnode_result_iri(qnode: dict[str, Any], row: dict[str, str]) -> str:
+    constant_id = qnode_constant_id(qnode)
+    if constant_id is not None:
+        return curie_to_iri(constant_id)
+    return row[qnode_binding_var(qnode)]
+
+
 def qedge_binding_var(qedge: dict[str, Any]) -> str:
     return f"?edge_{qedge['index']}_{safe_var_suffix(qedge['qedge_id'])}"
 
 
 def qedge_predicate_var(qedge: dict[str, Any]) -> str:
     return f"?predicate_{qedge['index']}_{safe_var_suffix(qedge['qedge_id'])}"
-
-
-def qedge_predicate_filter_var(qedge: dict[str, Any], mode_index: int) -> str:
-    return f"?predicate_filter_{qedge['index']}_{safe_var_suffix(qedge['qedge_id'])}_{mode_index}"
 
 
 def qedge_qualifier_predicate_var(qedge: dict[str, Any], constraint_index: int, filter_index: int) -> str:
@@ -744,10 +812,12 @@ def bind_orphan_qnode(lines: list[str], qnode: dict[str, Any]) -> None:
 
 
 def append_node_filters(lines: list[str], qnode: dict[str, Any]) -> None:
-    variable = qnode_binding_var(qnode)
-    ids = [curie_to_iri(value) for value in qnode["ids"]]
-    if ids:
-        lines.append(f"  {values_clause(variable, ids)}")
+    constant_term = qnode_constant_term(qnode) if qnode_constant_id(qnode) is not None else None
+    variable = constant_term or qnode_binding_var(qnode)
+    if constant_term is None:
+        ids = [curie_to_iri(value) for value in qnode["ids"]]
+        if ids:
+            lines.append(f"  {values_clause(variable, ids)}")
 
     categories = [curie_to_iri(value) for value in qnode["categories"]]
     if categories:
@@ -812,7 +882,6 @@ def build_qedge_mode_lines(
     normalized_request: dict[str, Any],
     qedge: dict[str, Any],
     mode: dict[str, Any],
-    mode_index: int,
 ) -> list[str]:
     subject_var = qnode_binding_var(normalized_request["qnodes"][qedge["subject"]])
     object_var = qnode_binding_var(normalized_request["qnodes"][qedge["object"]])
@@ -830,9 +899,7 @@ def build_qedge_mode_lines(
     ]
     predicate_iris = [curie_to_iri(value) for value in mode["predicates"]]
     if predicate_iris:
-        predicate_filter_var = qedge_predicate_filter_var(qedge, mode_index)
-        lines.append(f"    {values_clause(predicate_filter_var, predicate_iris)}")
-        lines.append(f"    {predicate_var} <{RDFS_SUBPROPERTY_OF}>* {predicate_filter_var} .")
+        lines.append(f"    {values_clause(predicate_var, predicate_iris)}")
     lines.extend(build_constraint_lines(qedge_binding_var(qedge), qedge.get("attribute_constraints", []), indent="    "))
     lines.extend(build_qualifier_constraint_union_lines(qedge, indent="    "))
     lines.append(f'    BIND("{orientation}" AS {qedge_orientation_var(qedge)})')
@@ -840,18 +907,30 @@ def build_qedge_mode_lines(
     return lines
 
 
-def build_qedge_union_lines(normalized_request: dict[str, Any], qedge: dict[str, Any]) -> list[str]:
-    modes = predicate_match_modes(qedge["predicates"])
+def build_qedge_union_lines(
+    normalized_request: dict[str, Any],
+    qedge: dict[str, Any],
+    available_graph_predicates: frozenset[str] | None = None,
+) -> list[str]:
+    modes = predicate_match_modes(qedge["predicates"], available_graph_predicates=available_graph_predicates)
     lines: list[str] = []
     for mode_index, mode in enumerate(modes):
         if mode_index:
             lines.append("  UNION")
-        lines.extend(build_qedge_mode_lines(normalized_request, qedge, mode, mode_index))
+        lines.extend(build_qedge_mode_lines(normalized_request, qedge, mode))
     return lines
 
 
-def build_trapi_query(normalized_request: dict[str, Any], limit: int | None = None) -> str:
-    qnode_vars = [qnode_binding_var(qnode) for qnode in normalized_request["qnodes"].values()]
+def build_trapi_query(
+    normalized_request: dict[str, Any],
+    limit: int | None = None,
+    available_graph_predicates: frozenset[str] | None = None,
+) -> str:
+    qnode_vars = [
+        qnode_binding_var(qnode)
+        for qnode in normalized_request["qnodes"].values()
+        if qnode_constant_id(qnode) is None
+    ]
     qedge_vars = [qedge_binding_var(qedge) for qedge in normalized_request["qedges"].values()]
     predicate_vars = [
         qedge_predicate_var(qedge)
@@ -875,7 +954,13 @@ def build_trapi_query(normalized_request: dict[str, Any], limit: int | None = No
         if qedge.get("_subclass", False):
             lines.extend(build_subclass_union_lines(normalized_request, qedge))
         else:
-            lines.extend(build_qedge_union_lines(normalized_request, qedge))
+            lines.extend(
+                build_qedge_union_lines(
+                    normalized_request,
+                    qedge,
+                    available_graph_predicates=available_graph_predicates,
+                )
+            )
 
     for qnode_id in normalized_request["orphan_qnodes"]:
         bind_orphan_qnode(lines, normalized_request["qnodes"][qnode_id])
@@ -886,7 +971,6 @@ def build_trapi_query(normalized_request: dict[str, Any], limit: int | None = No
     lines.extend(
         [
             "}",
-            f"ORDER BY {' '.join(qnode_vars + qedge_vars)}",
         ]
     )
     if limit is not None:
@@ -896,7 +980,12 @@ def build_trapi_query(normalized_request: dict[str, Any], limit: int | None = No
 
 def build_subclass_union_lines(normalized_request: dict[str, Any], qedge: dict[str, Any]) -> list[str]:
     actual_var = qnode_binding_var(normalized_request["qnodes"][qedge["subject"]])
-    superclass_var = qnode_binding_var(normalized_request["qnodes"][qedge["object"]])
+    superclass_qnode = normalized_request["qnodes"][qedge["object"]]
+    superclass_var = (
+        qnode_constant_term(superclass_qnode)
+        if qnode_constant_id(superclass_qnode) is not None
+        else qnode_binding_var(superclass_qnode)
+    )
     path_var = qedge_binding_var(qedge)
     max_path_length = qedge["_max_path_length"]
 
@@ -1216,6 +1305,17 @@ def dedupe_sources(sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return deduped
 
 
+def sort_sources(sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(
+        dedupe_sources(sources),
+        key=lambda source: (
+            SOURCE_ROLE_ORDER.get(source["resource_role"], 99),
+            source["resource_id"],
+            tuple(source.get("upstream_resource_ids", [])),
+        ),
+    )
+
+
 def nested_sources_from_properties(
     edge_properties: list[dict[str, str]],
     properties: dict[str, list[dict[str, str]]],
@@ -1290,6 +1390,7 @@ def build_sources(
     sources = nested_sources_from_properties(edge_properties, properties)
     if not sources:
         sources = legacy_sources_from_properties(edge_properties)
+    sources = sort_sources(sources)
 
     if not any(source["resource_role"] == "primary_knowledge_source" for source in sources):
         return [
@@ -1330,7 +1431,14 @@ def build_qualifiers(properties: list[dict[str, str]]) -> list[dict[str, Any]]:
                 "qualifier_value": qualifier_value,
             }
         )
-    return qualifiers
+    return sorted(
+        qualifiers,
+        key=lambda qualifier: (
+            0 if qualifier["qualifier_type_id"] == "biolink:qualified_predicate" else 1,
+            qualifier["qualifier_type_id"],
+            json.dumps(qualifier["qualifier_value"], sort_keys=True, default=str),
+        ),
+    )
 
 
 def qualifier_predicates_in_properties(properties: list[dict[str, str]]) -> set[str]:
@@ -1468,19 +1576,25 @@ def build_result_key(
     )
 
 
-def build_resource_properties_query(resources: list[str], include_structural: bool = False) -> str:
+def build_resource_properties_query(
+    resources: list[str],
+    include_structural: bool = False,
+    predicate_iris: list[str] | tuple[str, ...] | None = None,
+) -> str:
     values = " ".join(iri_term(resource) for resource in resources)
+    predicate_values_clause = ""
+    if predicate_iris:
+        predicate_values_clause = f"  {values_clause('?predicate', list(predicate_iris))}\n"
     filter_clause = (
         ""
-        if include_structural
+        if include_structural or predicate_iris
         else f"  FILTER (?predicate NOT IN (<{RDF_NS}subject>, <{RDF_NS}predicate>, <{RDF_NS}object>))\n"
     )
     return f"""SELECT ?resource ?predicate ?value
 WHERE {{
   VALUES ?resource {{ {values} }}
-  ?resource ?predicate ?value .
+{predicate_values_clause}  ?resource ?predicate ?value .
 {filter_clause}}}
-ORDER BY ?resource ?predicate ?value
 """
 
 
@@ -1542,6 +1656,64 @@ def curie_prefix(value: str) -> str | None:
 def meta_edge_key(subject: str, predicate: str, object_: str) -> str:
     digest = hashlib.sha256(f"{subject}|{predicate}|{object_}".encode("utf-8")).hexdigest()
     return digest[:16]
+
+
+def elapsed_ms(start: float) -> int:
+    return round((time.perf_counter() - start) * 1000)
+
+
+def parse_duration_ms(value: str | int | float | None) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return round(value)
+
+    text = value.strip()
+    if re.fullmatch(r"\d+(?:\.\d+)?", text):
+        return round(float(text))
+
+    match = QLEVER_DURATION_RE.fullmatch(text)
+    if match is None:
+        raise ValueError(f"Unsupported QLever duration format: {value}")
+
+    magnitude = float(match["value"])
+    unit = match["unit"]
+    factor = {
+        "ns": 0.000001,
+        "us": 0.001,
+        "ms": 1,
+        "s": 1000,
+    }[unit]
+    return round(magnitude * factor)
+
+
+def qlever_runtime_timing(result: dict[str, Any]) -> dict[str, int | None] | None:
+    runtime_information = result.get("json", {}).get("runtimeInformation")
+    if runtime_information is None:
+        return None
+
+    time_payload = runtime_information.get("time", {})
+    meta_payload = runtime_information.get("meta", {})
+    execution_tree = runtime_information.get("query_execution_tree", {})
+    planning_ms = parse_duration_ms(meta_payload.get("time_query_planning"))
+    compute_result_ms = parse_duration_ms(time_payload.get("computeResult"))
+    if compute_result_ms is None:
+        compute_result_ms = (
+            parse_duration_ms(execution_tree.get("original_total_time"))
+            or parse_duration_ms(execution_tree.get("total_time"))
+        )
+    total_ms = parse_duration_ms(time_payload.get("total"))
+    if total_ms is None:
+        if planning_ms is not None and compute_result_ms is not None:
+            total_ms = planning_ms + compute_result_ms
+        else:
+            total_ms = compute_result_ms
+
+    return {
+        "planning_ms": planning_ms,
+        "compute_result_ms": compute_result_ms,
+        "total_ms": total_ms,
+    }
 
 
 def answer_meta_knowledge_graph_request(
@@ -1645,12 +1817,12 @@ def build_results(
     for row in rows:
         node_bindings: dict[str, list[dict[str, Any]]] = {}
         for qnode_id, qnode in normalized_request["original_qnodes"].items():
-            actual_node_id = iri_to_curie(row[qnode_binding_var(normalized_request["qnodes"][qnode_id])])
+            actual_node_id = qnode_result_id(normalized_request["qnodes"][qnode_id], row)
             superclass_qnode_id = f"{qnode_id}_superclass"
             if qnode_id in set_interpretation_all_qnodes:
                 binding_node_id = actual_node_id
             elif superclass_qnode_id in normalized_request["qnodes"]:
-                superclass_node_id = iri_to_curie(row[qnode_binding_var(normalized_request["qnodes"][superclass_qnode_id])])
+                superclass_node_id = qnode_result_id(normalized_request["qnodes"][superclass_qnode_id], row)
                 binding_node_id = actual_node_id if actual_node_id == superclass_node_id else superclass_node_id
             else:
                 binding_node_id = actual_node_id
@@ -1670,8 +1842,9 @@ def build_results(
                 subclass_support_iris = support_edge_ids_from_row(subclass_qedge, row)
                 if subclass_support_iris:
                     support_edge_ids.extend(iri_to_curie(edge_iri) for edge_iri in subclass_support_iris)
-                    superclass_node_ids[endpoint] = iri_to_curie(
-                        row[qnode_binding_var(normalized_request["qnodes"][superclass_qnode_id])]
+                    superclass_node_ids[endpoint] = qnode_result_id(
+                        normalized_request["qnodes"][superclass_qnode_id],
+                        row,
                     )
 
             if support_edge_ids:
@@ -1760,8 +1933,11 @@ def linked_resource_predicates() -> set[str]:
     return {slot_iri(slot_name) for slot_name in LINKED_RESOURCE_SLOTS}
 
 
-def linked_resources_from_property_map(properties: dict[str, list[dict[str, str]]]) -> list[str]:
-    predicates = linked_resource_predicates()
+def linked_resources_from_property_map(
+    properties: dict[str, list[dict[str, str]]],
+    predicates: set[str] | None = None,
+) -> list[str]:
+    predicates = predicates or linked_resource_predicates()
     return dedupe(
         [
             prop["value"]
@@ -1772,27 +1948,111 @@ def linked_resources_from_property_map(properties: dict[str, list[dict[str, str]
     )
 
 
+def source_resource_predicates() -> tuple[str, str, str]:
+    return (
+        slot_iri("resource_id"),
+        slot_iri("resource_role"),
+        slot_iri("upstream_resource_ids"),
+    )
+
+
 def expand_linked_resource_properties(
     host_name: str,
     port: int,
     properties: dict[str, list[dict[str, str]]],
     access_token: str | None = None,
+    timing: dict[str, Any] | None = None,
 ) -> dict[str, list[dict[str, str]]]:
+    total_start = time.perf_counter()
     expanded = {resource: list(resource_properties) for resource, resource_properties in properties.items()}
     seen_resources = set(expanded)
-    frontier = [resource for resource in linked_resources_from_property_map(expanded) if resource not in seen_resources]
+    source_predicate = slot_iri("sources")
+    attributes_predicate = slot_iri("attributes")
+    source_frontier = [
+        resource
+        for resource in linked_resources_from_property_map(expanded, {source_predicate})
+        if resource not in seen_resources
+    ]
+    attribute_frontier = [
+        resource
+        for resource in linked_resources_from_property_map(expanded, {attributes_predicate})
+        if resource not in seen_resources
+    ]
+    iteration_timings: list[dict[str, Any]] = []
 
-    while frontier:
-        fetched = fetch_properties_for_resources(
-            host_name,
-            port,
-            frontier,
-            access_token=access_token,
-            include_structural=True,
-        )
+    while source_frontier or attribute_frontier:
+        attribute_frontier = dedupe(attribute_frontier)
+        source_frontier = [
+            resource
+            for resource in dedupe(source_frontier)
+            if resource not in attribute_frontier
+        ]
+        iteration_start = time.perf_counter()
+        iteration_timing: dict[str, Any] = {}
+        fetched: dict[str, list[dict[str, str]]] = {}
+        if source_frontier:
+            source_query_timing: dict[str, Any] = {}
+            fetched = merge_resource_properties(
+                fetched,
+                fetch_properties_for_resources(
+                    host_name,
+                    port,
+                    source_frontier,
+                    access_token=access_token,
+                    include_structural=False,
+                    predicate_iris=source_resource_predicates(),
+                    timing=source_query_timing,
+                ),
+            )
+            iteration_timing["source_query"] = source_query_timing
+        if attribute_frontier:
+            attribute_query_timing: dict[str, Any] = {}
+            fetched = merge_resource_properties(
+                fetched,
+                fetch_properties_for_resources(
+                    host_name,
+                    port,
+                    attribute_frontier,
+                    access_token=access_token,
+                    include_structural=False,
+                    timing=attribute_query_timing,
+                ),
+            )
+            iteration_timing["attribute_query"] = attribute_query_timing
         expanded = merge_resource_properties(expanded, fetched)
-        seen_resources.update(frontier)
-        frontier = [resource for resource in linked_resources_from_property_map(fetched) if resource not in seen_resources]
+        seen_resources.update(source_frontier)
+        seen_resources.update(attribute_frontier)
+        iteration_timing.update(
+            {
+                "resource_count": len(source_frontier) + len(attribute_frontier),
+                "source_resource_count": len(source_frontier),
+                "attribute_resource_count": len(attribute_frontier),
+                "fetched_resource_count": len(fetched),
+                "total_ms": elapsed_ms(iteration_start),
+            }
+        )
+        iteration_timings.append(iteration_timing)
+        source_frontier = [
+            resource
+            for resource in linked_resources_from_property_map(fetched, {source_predicate})
+            if resource not in seen_resources
+        ]
+        attribute_frontier = [
+            resource
+            for resource in linked_resources_from_property_map(fetched, {attributes_predicate})
+            if resource not in seen_resources
+        ]
+
+    if timing is not None:
+        timing.update(
+            {
+                "seed_resource_count": len(properties),
+                "expanded_resource_count": len(expanded),
+                "iteration_count": len(iteration_timings),
+                "iterations": iteration_timings,
+                "total_ms": elapsed_ms(total_start),
+            }
+        )
 
     return expanded
 
@@ -1803,21 +2063,58 @@ def fetch_properties_for_resources(
     resources: list[str],
     access_token: str | None = None,
     include_structural: bool = False,
+    predicate_iris: list[str] | tuple[str, ...] | None = None,
+    timing: dict[str, Any] | None = None,
 ) -> dict[str, list[dict[str, str]]]:
+    total_start = time.perf_counter()
     if not resources:
+        if timing is not None:
+            timing.update(
+                {
+                    "resource_count": 0,
+                    "wall_ms": 0,
+                    "json_parse_ms": 0,
+                    "row_parse_ms": 0,
+                    "property_count": 0,
+                    "fetched_resource_count": 0,
+                    "qlever": None,
+                    "total_ms": 0,
+                }
+            )
         return {}
-    result = run_qlever_query(
+    result = run_qlever_query_with_runtime(
         host_name,
         port,
-        build_resource_properties_query(resources, include_structural=include_structural),
+        build_resource_properties_query(
+            resources,
+            include_structural=include_structural,
+            predicate_iris=predicate_iris,
+        ),
         access_token=access_token,
     )
+    row_parse_start = time.perf_counter()
+    rows = rows_from_result(result)
+    rows.sort(key=lambda row: (row["?resource"], row["?predicate"], row["?value"]))
+    row_parse_ms = elapsed_ms(row_parse_start)
     properties: dict[str, list[dict[str, str]]] = {}
-    for row in rows_from_result(result):
+    for row in rows:
         properties.setdefault(row["?resource"], []).append(
             {
                 "predicate": row["?predicate"],
                 "value": row["?value"],
+            }
+        )
+    if timing is not None:
+        timing.update(
+            {
+                "resource_count": len(resources),
+                "wall_ms": result["elapsed_ms"],
+                "json_parse_ms": result["json_parse_ms"],
+                "row_parse_ms": row_parse_ms,
+                "property_count": sum(len(resource_properties) for resource_properties in properties.values()),
+                "fetched_resource_count": len(properties),
+                "qlever": qlever_runtime_timing(result),
+                "total_ms": elapsed_ms(total_start),
             }
         )
     return properties
@@ -1832,34 +2129,84 @@ def answer_trapi_request(
     resource_id: str = "infores:qlever-trapi",
     subclass_depth: int = 1,
 ) -> dict[str, Any]:
+    total_start = time.perf_counter()
+
+    normalize_start = time.perf_counter()
     normalized = normalize_trapi_request(request, subclass_depth=subclass_depth)
+    normalize_request_ms = elapsed_ms(normalize_start)
     if not normalized["qnodes"] and not normalized["qedges"]:
+        message = {
+            "query_graph": normalized["query_graph"],
+            "knowledge_graph": {
+                "nodes": {},
+                "edges": {},
+            },
+            "results": [],
+            "auxiliary_graphs": {},
+        }
         return {
-            "message": {
-                "query_graph": normalized["query_graph"],
-                "knowledge_graph": {
-                    "nodes": {},
-                    "edges": {},
+            "message": message,
+            "timing": {
+                "total_ms": elapsed_ms(total_start),
+                "trapi_to_sparql": {
+                    "normalize_request_ms": normalize_request_ms,
+                    "build_sparql_ms": 0,
+                    "total_ms": normalize_request_ms,
                 },
-                "results": [],
-                "auxiliary_graphs": {},
-            }
+                "primary_query": None,
+                "property_fetch": {
+                    "resource_count": 0,
+                    "node_resource_count": 0,
+                    "edge_resource_count": 0,
+                    "initial_query": None,
+                    "linked_expansion": {
+                        "seed_resource_count": 0,
+                        "expanded_resource_count": 0,
+                        "iteration_count": 0,
+                        "iterations": [],
+                        "total_ms": 0,
+                    },
+                    "total_ms": 0,
+                },
+                "trapi_response": {
+                    "collect_resources_ms": 0,
+                    "build_knowledge_graph_ms": 0,
+                    "build_results_ms": 0,
+                    "total_ms": 0,
+                },
+                "counts": {
+                    "query_row_count": 0,
+                    "node_count": 0,
+                    "edge_count": 0,
+                    "result_count": 0,
+                    "auxiliary_graph_count": 0,
+                },
+            },
         }
 
-    query = build_trapi_query(normalized, limit=limit)
-    result = run_qlever_query(
+    build_query_start = time.perf_counter()
+    available_graph_predicates = None
+    if any(qedge.get("predicates") for qedge in normalized["qedges"].values() if not qedge.get("_subclass", False)):
+        available_graph_predicates = graph_predicates(host_name, port, access_token)
+    query = build_trapi_query(normalized, limit=limit, available_graph_predicates=available_graph_predicates)
+    build_sparql_ms = elapsed_ms(build_query_start)
+
+    result = run_qlever_query_with_runtime(
         host_name,
         port,
         query,
         access_token=access_token,
     )
+    row_parse_start = time.perf_counter()
     rows = rows_from_result(result)
+    row_parse_ms = elapsed_ms(row_parse_start)
 
+    collect_resources_start = time.perf_counter()
     node_resources: list[str] = []
     edge_resources: list[str] = []
     for row in rows:
         for qnode in normalized["qnodes"].values():
-            node_resources.append(row[qnode_binding_var(qnode)])
+            node_resources.append(qnode_result_iri(qnode, row))
         for qedge in normalized["qedges"].values():
             if qedge.get("_subclass", False):
                 edge_resources.extend(support_edge_ids_from_row(qedge, row))
@@ -1868,32 +2215,85 @@ def answer_trapi_request(
     node_resources = dedupe(node_resources)
     edge_resources = dedupe(edge_resources)
     resources = dedupe(node_resources + edge_resources)
+    collect_resources_ms = elapsed_ms(collect_resources_start)
+
+    initial_property_query_timing: dict[str, Any] = {}
+    linked_expansion_timing: dict[str, Any] = {}
+    property_fetch_start = time.perf_counter()
     properties = fetch_properties_for_resources(
         host_name,
         port,
         resources,
         access_token=access_token,
         include_structural=True,
+        timing=initial_property_query_timing,
     )
     properties = expand_linked_resource_properties(
         host_name,
         port,
         properties,
         access_token=access_token,
+        timing=linked_expansion_timing,
     )
+    property_fetch_total_ms = elapsed_ms(property_fetch_start)
+
+    build_knowledge_graph_start = time.perf_counter()
     nodes, edges = build_knowledge_graph(node_resources, edge_resources, properties, resource_id)
+    build_knowledge_graph_ms = elapsed_ms(build_knowledge_graph_start)
+    build_results_start = time.perf_counter()
     results, edges, auxiliary_graphs = build_results(normalized, rows, resource_id, edges)
+    build_results_ms = elapsed_ms(build_results_start)
+    trapi_response_total_ms = collect_resources_ms + build_knowledge_graph_ms + build_results_ms
+
+    message = {
+        "query_graph": normalized["query_graph"],
+        "knowledge_graph": {
+            "nodes": nodes,
+            "edges": edges,
+        },
+        "results": results,
+        "auxiliary_graphs": auxiliary_graphs,
+    }
+    timing = {
+        "total_ms": elapsed_ms(total_start),
+        "trapi_to_sparql": {
+            "normalize_request_ms": normalize_request_ms,
+            "build_sparql_ms": build_sparql_ms,
+            "total_ms": normalize_request_ms + build_sparql_ms,
+        },
+        "primary_query": {
+            "wall_ms": result["elapsed_ms"],
+            "json_parse_ms": result["json_parse_ms"],
+            "row_parse_ms": row_parse_ms,
+            "row_count": len(rows),
+            "qlever": qlever_runtime_timing(result),
+        },
+        "property_fetch": {
+            "resource_count": len(resources),
+            "node_resource_count": len(node_resources),
+            "edge_resource_count": len(edge_resources),
+            "initial_query": initial_property_query_timing,
+            "linked_expansion": linked_expansion_timing,
+            "total_ms": property_fetch_total_ms,
+        },
+        "trapi_response": {
+            "collect_resources_ms": collect_resources_ms,
+            "build_knowledge_graph_ms": build_knowledge_graph_ms,
+            "build_results_ms": build_results_ms,
+            "total_ms": trapi_response_total_ms,
+        },
+        "counts": {
+            "query_row_count": len(rows),
+            "node_count": len(nodes),
+            "edge_count": len(edges),
+            "result_count": len(results),
+            "auxiliary_graph_count": len(auxiliary_graphs),
+        },
+    }
 
     return {
-        "message": {
-            "query_graph": normalized["query_graph"],
-            "knowledge_graph": {
-                "nodes": nodes,
-                "edges": edges,
-            },
-            "results": results,
-            "auxiliary_graphs": auxiliary_graphs,
-        }
+        "message": message,
+        "timing": timing,
     }
 
 
@@ -1902,6 +2302,7 @@ def response_envelope(
     description: str,
     http_code: int,
     message: dict[str, Any] | None = None,
+    timing: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     body: dict[str, Any] = {
         "status": status,
@@ -1910,6 +2311,8 @@ def response_envelope(
     }
     if message is not None:
         body["message"] = message
+    if timing is not None:
+        body["timing"] = timing
     return body
 
 
@@ -2046,6 +2449,7 @@ def make_trapi_handler(
                     description="Query processed successfully",
                     http_code=HTTPStatus.OK,
                     message=response["message"],
+                    timing=response["timing"],
                 ),
                 HTTPStatus.OK,
             )

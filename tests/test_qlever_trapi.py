@@ -460,18 +460,21 @@ def test_build_trapi_query_supports_multi_edge_shapes() -> None:
     assert "rdf:subject ?node_1_n1" in query
     assert "rdf:object ?node_2_n2" in query
     assert "<https://w3id.org/biolink/vocab/affects>" in query
-    assert "subPropertyOf" in query
+    assert "VALUES ?predicate_0_e0" in query
+    assert "VALUES ?predicate_1_e1" not in query
+    assert "subPropertyOf" not in query
     assert "UNION" in query
+    assert "ORDER BY" not in query
     assert "LIMIT 25" in query
 
 
 def test_build_trapi_query_adds_internal_subclass_patterns_for_pinned_nodes() -> None:
     query = build_trapi_query(normalize_trapi_request(sample_request(), subclass_depth=1), limit=25)
 
-    assert "?node_2_n0_superclass" in query
     assert "?edge_1_n0_subclass_edge" in query
     assert "rdf:predicate <https://w3id.org/biolink/vocab/subclass_of>" in query
-    assert "FILTER(?node_0_n0 = ?node_2_n0_superclass)" in query
+    assert "FILTER(?node_0_n0 = <https://identifiers.org/CHEBI:45783>)" in query
+    assert "<https://identifiers.org/CHEBI:45783> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type>/<http://www.w3.org/2000/01/rdf-schema#subClassOf>* ?node_category_2_n0_superclass ." in query
     assert "UNION" in query
 
 
@@ -484,6 +487,18 @@ def test_build_trapi_query_adds_qualifier_filters() -> None:
     assert "object_aspect_qualifier" in query
     assert "biolink/vocab/causes" in query
     assert "activity" in query
+
+
+def test_build_trapi_query_prunes_predicates_not_present_in_graph() -> None:
+    query = build_trapi_query(
+        normalize_trapi_request(chain_request(), subclass_depth=0),
+        limit=25,
+        available_graph_predicates=frozenset({"biolink:affects"}),
+    )
+
+    assert "<https://w3id.org/biolink/vocab/affects>" in query
+    assert "<https://w3id.org/biolink/vocab/ameliorates_condition>" not in query
+    assert "VALUES ?predicate_0_e0 { <https://w3id.org/biolink/vocab/affects> }" in query
 
 
 def test_build_trapi_query_supports_node_only_orphan_queries() -> None:
@@ -509,12 +524,17 @@ def qlever_test_server() -> tuple[str, int]:
             params = urllib.parse.parse_qs(payload)
             query = params["query"][0]
 
-            if "?subject_category ?predicate ?object_category" in query:
+            if "SELECT DISTINCT ?predicate" in query and "rdf:predicate ?predicate" in query:
+                body = graph_predicates_tsv()
+            elif "?subject_category ?predicate ?object_category" in query:
                 body = meta_knowledge_graph_edge_tsv()
             elif "?category ?node" in query:
                 body = meta_knowledge_graph_node_tsv()
             elif "VALUES ?resource" in query:
-                body = properties_tsv()
+                body = properties_tsv(
+                    query_resource_values(query),
+                    query_predicate_values(query),
+                )
             elif "?edge_1_n0_subclass_edge" in query and "HP:0000118" in query:
                 body = inverse_subclass_result_tsv()
             elif "?edge_1_n0_subclass_edge" in query and "MONDO:0000001" in query:
@@ -554,9 +574,16 @@ def qlever_test_server() -> tuple[str, int]:
             else:
                 body = single_edge_result_tsv()
 
-            encoded = body.encode("utf-8")
+            if self.headers.get("Accept") == "application/qlever-results+json":
+                response_body = qlever_results_json(query, body)
+                content_type = "application/qlever-results+json"
+            else:
+                response_body = body
+                content_type = "text/tab-separated-values"
+
+            encoded = response_body.encode("utf-8")
             self.send_response(200)
-            self.send_header("Content-Type", "text/tab-separated-values")
+            self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(encoded)))
             self.end_headers()
             self.wfile.write(encoded)
@@ -573,6 +600,85 @@ def qlever_test_server() -> tuple[str, int]:
         server.shutdown()
         thread.join()
         server.server_close()
+
+
+def qlever_json_term(value: str) -> str:
+    if value.startswith(("http://", "https://", "urn:")):
+        return f"<{value}>"
+    return value
+
+
+def qlever_results_json(query: str, body: str) -> str:
+    lines = [line for line in body.splitlines() if line]
+    if not lines:
+        selected: list[str] = []
+        rows: list[list[str]] = []
+    else:
+        selected = lines[0].split("\t")
+        rows = [[qlever_json_term(value) for value in line.split("\t")] for line in lines[1:]]
+
+    return json.dumps(
+        {
+            "query": query,
+            "selected": selected,
+            "status": "OK",
+            "warnings": [],
+            "res": rows,
+            "resultSizeExported": len(rows),
+            "resultSizeTotal": len(rows),
+            "resultsize": len(rows),
+            "runtimeInformation": {
+                "meta": {
+                    "time_query_planning": 7,
+                },
+                "query_execution_tree": {},
+                "time": {
+                    "computeResult": "11ms",
+                    "total": "13ms",
+                },
+            },
+        }
+    )
+
+
+def query_resource_values(query: str) -> set[str]:
+    prefix = "VALUES ?resource {"
+    start = query.index(prefix) + len(prefix)
+    end = query.index("}", start)
+    return {
+        term[1:-1]
+        for term in query[start:end].split()
+        if term.startswith("<") and term.endswith(">")
+    }
+
+
+def query_predicate_values(query: str) -> set[str] | None:
+    prefix = "VALUES ?predicate {"
+    if prefix not in query:
+        return None
+    start = query.index(prefix) + len(prefix)
+    end = query.index("}", start)
+    return {
+        term[1:-1]
+        for term in query[start:end].split()
+        if term.startswith("<") and term.endswith(">")
+    }
+
+
+def graph_predicates_tsv() -> str:
+    return "\n".join(
+        [
+            "?predicate",
+            "https://w3id.org/biolink/vocab/treats",
+            "https://w3id.org/biolink/vocab/affects",
+            "https://w3id.org/biolink/vocab/related_to",
+            "https://w3id.org/biolink/vocab/causes",
+            "https://w3id.org/biolink/vocab/genetically_associated_with",
+            "https://w3id.org/biolink/vocab/has_phenotype",
+            "https://w3id.org/biolink/vocab/subclass_of",
+            "",
+        ]
+    )
 
 
 def single_edge_result_tsv() -> str:
@@ -710,7 +816,10 @@ def meta_knowledge_graph_node_tsv() -> str:
     )
 
 
-def properties_tsv() -> str:
+def properties_tsv(
+    resources: set[str] | None = None,
+    predicates: set[str] | None = None,
+) -> str:
     rows = [
         "?resource\t?predicate\t?value",
         f"https://identifiers.org/CHEBI:45783\t{RDFS_LABEL}\t\"Imatinib\"",
@@ -839,6 +948,10 @@ def properties_tsv() -> str:
         "urn:uuid:albuminuria-subclass-phenotype\thttp://www.w3.org/1999/02/22-rdf-syntax-ns#object\thttps://identifiers.org/HP:0000118",
         "urn:uuid:albuminuria-subclass-phenotype\thttps://w3id.org/biolink/vocab/primary_knowledge_source\tinfores:test-kp",
     ]
+    if resources is not None:
+        rows = [rows[0]] + [row for row in rows[1:] if row.split("\t", 1)[0] in resources]
+    if predicates is not None:
+        rows = [rows[0]] + [row for row in rows[1:] if row.split("\t")[1] in predicates]
     return "\n".join(rows) + "\n"
 
 
@@ -1008,6 +1121,46 @@ def test_answer_trapi_request_returns_metadata_rich_edge_payload(
             ],
         }
     ]
+
+
+def test_answer_trapi_request_includes_granular_timing(
+    qlever_test_server: tuple[str, int],
+) -> None:
+    host, port = qlever_test_server
+
+    response = answer_trapi_request(
+        sample_request(),
+        host_name=host,
+        port=port,
+        limit=10,
+        resource_id="infores:qlever-trapi-test",
+        subclass_depth=0,
+    )
+
+    assert response["timing"]["total_ms"] >= 0
+    assert response["timing"]["trapi_to_sparql"]["normalize_request_ms"] >= 0
+    assert response["timing"]["trapi_to_sparql"]["build_sparql_ms"] >= 0
+    assert response["timing"]["primary_query"]["row_count"] == 1
+    assert response["timing"]["primary_query"]["qlever"] == {
+        "planning_ms": 7,
+        "compute_result_ms": 11,
+        "total_ms": 13,
+    }
+    assert response["timing"]["property_fetch"]["resource_count"] == 3
+    assert response["timing"]["property_fetch"]["node_resource_count"] == 2
+    assert response["timing"]["property_fetch"]["edge_resource_count"] == 1
+    assert response["timing"]["property_fetch"]["initial_query"]["qlever"]["total_ms"] == 13
+    assert response["timing"]["property_fetch"]["linked_expansion"]["iteration_count"] == 1
+    assert response["timing"]["property_fetch"]["linked_expansion"]["iterations"][0]["resource_count"] == 2
+    assert response["timing"]["trapi_response"]["build_knowledge_graph_ms"] >= 0
+    assert response["timing"]["trapi_response"]["build_results_ms"] >= 0
+    assert response["timing"]["counts"] == {
+        "query_row_count": 1,
+        "node_count": 2,
+        "edge_count": 1,
+        "result_count": 1,
+        "auxiliary_graph_count": 0,
+    }
 
 
 def test_answer_trapi_request_supports_chain_query_graph(
@@ -1662,16 +1815,22 @@ def test_answer_trapi_request_preserves_inverse_subclass_orientation(
 def test_answer_trapi_request_returns_empty_payload_for_empty_query_graph() -> None:
     response = answer_trapi_request(empty_request(), subclass_depth=1)
 
-    assert response == {
-        "message": {
-            "query_graph": empty_request()["message"]["query_graph"],
-            "knowledge_graph": {
-                "nodes": {},
-                "edges": {},
-            },
-            "results": [],
-            "auxiliary_graphs": {},
-        }
+    assert response["message"] == {
+        "query_graph": empty_request()["message"]["query_graph"],
+        "knowledge_graph": {
+            "nodes": {},
+            "edges": {},
+        },
+        "results": [],
+        "auxiliary_graphs": {},
+    }
+    assert response["timing"]["primary_query"] is None
+    assert response["timing"]["counts"] == {
+        "query_row_count": 0,
+        "node_count": 0,
+        "edge_count": 0,
+        "result_count": 0,
+        "auxiliary_graph_count": 0,
     }
 
 
@@ -1790,6 +1949,7 @@ def test_http_service_query_endpoint_returns_trapi_envelope(
     assert response["status"] == "Success"
     assert response["description"] == "Query processed successfully"
     assert response["http_code"] == 200
+    assert response["timing"]["primary_query"]["qlever"]["total_ms"] == 13
     assert response["message"]["knowledge_graph"]["edges"]["urn:uuid:edge-related"]["predicate"] == "biolink:related_to"
     assert response["message"]["results"][0]["analyses"][0]["resource_id"] == "infores:qlever-trapi-http-test"
 
@@ -1842,6 +2002,7 @@ def test_fastapi_query_endpoint_returns_trapi_envelope(fastapi_client: TestClien
     assert payload["status"] == "Success"
     assert payload["description"] == "Query processed successfully"
     assert payload["http_code"] == 200
+    assert payload["timing"]["primary_query"]["qlever"]["total_ms"] == 13
     assert payload["message"]["knowledge_graph"]["edges"]["urn:uuid:edge-related"]["predicate"] == "biolink:related_to"
     assert payload["message"]["results"][0]["analyses"][0]["resource_id"] == "infores:qlever-trapi-fastapi-test"
 
@@ -1871,6 +2032,7 @@ def test_fastapi_asyncquery_endpoint_completes_and_posts_callback(
         raise AssertionError(f"Async query job {job_id} did not complete in time")
 
     assert status_response.status_code == 200
+    assert status_payload["timing"]["primary_query"]["qlever"]["total_ms"] == 13
     assert status_payload["message"]["results"] == [
         {
             "node_bindings": {
@@ -1889,6 +2051,7 @@ def test_fastapi_asyncquery_endpoint_completes_and_posts_callback(
     ]
     assert captured, "Expected asyncquery callback to be delivered"
     assert captured[0]["status"] == "Success"
+    assert captured[0]["timing"] == status_payload["timing"]
     assert captured[0]["message"]["results"] == status_payload["message"]["results"]
 
 

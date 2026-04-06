@@ -5,6 +5,7 @@ from make_qlever_config import (
     qleverfile_cat_input_files_command,
     render_index_command,
     render_qleverfile,
+    render_start_command,
 )
 
 
@@ -52,3 +53,15 @@ def test_render_index_command_adds_cat_input_files_for_zstd():
 def test_default_artifact_paths():
     assert default_input_file("translator_kg", "artifacts") == "artifacts/rdf/translator_kg.nt.zst"
     assert dataset_base_name("translator_kg", "artifacts") == "artifacts/qlever/translator_kg/translator_kg"
+
+
+def test_render_start_command_includes_query_memory_and_timeout():
+    command = render_start_command(
+        "artifacts/qlever/translator_kg/translator_kg",
+        "20G",
+        "300s",
+    )
+    assert command == (
+        "qlever start --system native --name 'artifacts/qlever/translator_kg/translator_kg' "
+        "--memory-for-queries 20G --timeout 300s"
+    )

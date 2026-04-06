@@ -194,6 +194,8 @@ def async_status_payload(job_id: str, job: dict[str, Any], request: Request) -> 
     }
     if job.get("message") is not None:
         payload["message"] = job["message"]
+    if job.get("timing") is not None:
+        payload["timing"] = job["timing"]
     if job.get("callback"):
         payload["callback"] = job["callback"]
     if job.get("callback_error"):
@@ -201,12 +203,13 @@ def async_status_payload(job_id: str, job: dict[str, Any], request: Request) -> 
     return payload
 
 
-def callback_request_payload(message: dict[str, Any]) -> dict[str, Any]:
+def callback_request_payload(response: dict[str, Any]) -> dict[str, Any]:
     return response_envelope(
         status="Success",
         description="Query processed successfully",
         http_code=HTTPStatus.OK,
-        message=message["message"],
+        message=response["message"],
+        timing=response["timing"],
     )
 
 
@@ -256,6 +259,7 @@ def run_async_query(runtime: dict[str, Any], job_id: str, request_body: dict[str
             description="Query processed successfully",
             http_code=HTTPStatus.OK,
             message=response["message"],
+            timing=response["timing"],
         )
         if isinstance(callback, str) and callback:
             try:
@@ -298,6 +302,7 @@ def submit_async_query(runtime: dict[str, Any], request_body: dict[str, Any]) ->
             "description": "Query accepted for asynchronous processing",
             "http_code": HTTPStatus.ACCEPTED,
             "message": None,
+            "timing": None,
             "callback": request_body.get("callback"),
             "callback_error": None,
             "submitted_at": submitted_at,
@@ -406,6 +411,7 @@ def create_fastapi_app(
                 description="Query processed successfully",
                 http_code=HTTPStatus.OK,
                 message=response["message"],
+                timing=response["timing"],
             ),
         )
 

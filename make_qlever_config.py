@@ -46,6 +46,16 @@ def parse_args() -> argparse.Namespace:
         help="Value for `qlever index --stxxl-memory`.",
     )
     parser.add_argument(
+        "--query-memory",
+        default="20G",
+        help="Value for `qlever start --memory-for-queries`.",
+    )
+    parser.add_argument(
+        "--timeout",
+        default="300s",
+        help="Value for `qlever start --timeout`.",
+    )
+    parser.add_argument(
         "--overwrite",
         action="store_true",
         help="Overwrite an existing Qleverfile.",
@@ -125,6 +135,13 @@ def render_index_command(dataset_base: str, input_file: str, memory: str) -> str
     return " ".join(command)
 
 
+def render_start_command(dataset_base: str, query_memory: str, timeout: str) -> str:
+    return (
+        f"qlever start --system native --name '{dataset_base}' "
+        f"--memory-for-queries {query_memory} --timeout {timeout}"
+    )
+
+
 def main() -> None:
     args = parse_args()
     qleverfile = Path(args.qleverfile)
@@ -152,7 +169,7 @@ def main() -> None:
     print(render_index_command(dataset_base, input_file, args.memory))
     print()
     print("Start command:")
-    print(f"qlever start --system native --name '{dataset_base}'")
+    print(render_start_command(dataset_base, args.query_memory, args.timeout))
     print()
     print("UI command:")
     print(f"qlever ui --qleverfile {qleverfile}")

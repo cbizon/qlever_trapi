@@ -234,17 +234,18 @@ ORDER BY ?resource ?predicate ?value
 """
 
 
-def run_qlever_query(
+def _run_qlever_request(
     host_name: str,
     port: int,
     query: str,
+    accept: str,
     access_token: str | None = None,
-) -> dict[str, Any]:
+) -> tuple[str, int]:
     data = urllib.parse.urlencode({"query": query}).encode("utf-8")
     request = urllib.request.Request(
         f"http://{host_name}:{port}",
         data=data,
-        headers={"Accept": "text/tab-separated-values"},
+        headers={"Accept": accept},
         method="POST",
     )
     if access_token:
@@ -253,7 +254,48 @@ def run_qlever_query(
     with urllib.request.urlopen(request) as response:
         payload = response.read().decode("utf-8")
     elapsed_ms = round((time.perf_counter() - start) * 1000)
+    return payload, elapsed_ms
+
+
+def run_qlever_query(
+    host_name: str,
+    port: int,
+    query: str,
+    access_token: str | None = None,
+) -> dict[str, Any]:
+    payload, elapsed_ms = _run_qlever_request(
+        host_name,
+        port,
+        query,
+        accept="text/tab-separated-values",
+        access_token=access_token,
+    )
     return {"format": "tsv", "elapsed_ms": elapsed_ms, "payload": payload}
+
+
+def run_qlever_query_with_runtime(
+    host_name: str,
+    port: int,
+    query: str,
+    access_token: str | None = None,
+) -> dict[str, Any]:
+    payload, elapsed_ms = _run_qlever_request(
+        host_name,
+        port,
+        query,
+        accept="application/qlever-results+json",
+        access_token=access_token,
+    )
+    parse_start = time.perf_counter()
+    payload_json = json.loads(payload)
+    json_parse_ms = round((time.perf_counter() - parse_start) * 1000)
+    return {
+        "format": "qlever-results+json",
+        "elapsed_ms": elapsed_ms,
+        "json_parse_ms": json_parse_ms,
+        "payload": payload,
+        "json": payload_json,
+    }
 
 
 def iter_qlever_rows(
@@ -291,6 +333,19 @@ def iter_qlever_rows(
 
 
 def rows_from_result(result: dict[str, Any]) -> list[dict[str, str]]:
+    if result["format"] == "qlever-results+json":
+        header = result["json"].get("selected", [])
+        rows: list[dict[str, str]] = []
+        for values in result["json"].get("res", []):
+            if not values:
+                continue
+            row = {
+                column: normalize_iri(value)
+                for column, value in zip(header, values, strict=False)
+            }
+            rows.append(row)
+        return rows
+
     reader = csv.reader(io.StringIO(result["payload"]), delimiter="\t")
     try:
         header = next(reader)
